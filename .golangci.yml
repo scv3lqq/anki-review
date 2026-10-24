@@ -1,0 +1,46 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - noctx
+    - nolintlint
+    - revive
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - wrapcheck
+  settings:
+    wrapcheck:
+      # errors from our own packages are already wrapped where they are made
+      ignore-package-globs:
+        - github.com/scv3lqq/anki-review/*
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - wrapcheck
+          - gosec
+      - path: internal/testutil/
+        linters:
+          - wrapcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/scv3lqq/anki-review
