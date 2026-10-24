@@ -1,0 +1,52 @@
+# Headless Anki + AnkiConnect for anki-review. Start it with up.sh, which creates the secrets first.
+# ANKI_UID/ANKI_GID: the host user's ids (up.sh sets them). ANKI_CONNECT_PORT, VNC_PORT: host ports.
+name: anki-review
+
+services:
+  anki:
+    build:
+      context: .
+      args:
+        ANKI_UID: ${ANKI_UID:-1000}
+        ANKI_GID: ${ANKI_GID:-1000}
+    image: anki-desktop:26.09.3-ac26.10.14.0
+    container_name: anki-desktop
+    init: true
+    restart: unless-stopped
+    # Anki saves and syncs on SIGTERM; give it time before the kill.
+    stop_grace_period: 60s
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 1024
+    shm_size: 256m
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /home/anki:size=256m,uid=${ANKI_UID:-1000},gid=${ANKI_GID:-1000},mode=0700
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Published ports bypass ufw: the 127.0.0.1 bind is what keeps them off the internet.
+    ports:
+      - "127.0.0.1:${ANKI_CONNECT_PORT:-8765}:8765"
+      - "127.0.0.1:${VNC_PORT:-5900}:5900"
+    volumes:
+      - anki-data:/data
+    secrets:
+      - ankiconnect_key
+      - vnc_password
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+secrets:
+  ankiconnect_key:
+    file: ./secrets/ankiconnect-key
+  vnc_password:
+    file: ./secrets/vnc-password
+
+volumes:
+  anki-data:
+    name: anki-data

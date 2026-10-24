@@ -11,6 +11,14 @@
 # local environment
 .env
 .env.*
+!.env.example
+
+# deploy kit state, if up.sh or an upload ever runs inside the checkout
+/deploy/anki/secrets/
+/deploy/bin/
+/deploy/claude-token
+/deploy/install-state
+/deploy/.install-state.*
 
 # editors and OS
 .idea/

@@ -1,0 +1,48 @@
+# Template: install.sh replaces @DEPLOY_DIR@ with the deploy dir and installs the result.
+[Unit]
+Description=anki-review: grade typed Anki answers with Claude Code
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=anki-review
+Group=anki-review
+EnvironmentFile=/etc/anki-review/env
+WorkingDirectory=/var/lib/anki-review
+# Home of the service user: claude keeps its state and binary here, the only writable path.
+StateDirectory=anki-review
+StateDirectoryMode=0700
+UMask=0077
+# Takes the binary staged in the deploy dir, so an update is a file swap plus a restart.
+ExecStartPre=-+/usr/bin/install -C -o root -g root -m 0755 @DEPLOY_DIR@/bin/anki-review /usr/local/bin/anki-review
+# $$ keeps systemd from expanding the token into the argv of sh.
+ExecStartPre=/bin/sh -c 'test -n "$${CLAUDE_CODE_OAUTH_TOKEN}" || { echo "CLAUDE_CODE_OAUTH_TOKEN is empty in /etc/anki-review/env" >&2; exit 1; }'
+ExecStart=/usr/local/bin/anki-review
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+# No MemoryDenyWriteExecute: the claude binary JIT-compiles.
+
+[Install]
+WantedBy=multi-user.target
