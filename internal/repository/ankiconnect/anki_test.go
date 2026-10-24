@@ -212,7 +212,7 @@ func TestDueCards(t *testing.T) {
 	if items[0].Topic != "Tech::Go" {
 		t.Errorf("topic without Source = %q, want the deck", items[0].Topic)
 	}
-	wantIntervals := map[domain.Grade]string{domain.Again: "<1м", domain.Hard: "6м", domain.Good: "1д", domain.Easy: "4д"}
+	wantIntervals := map[domain.Grade]string{domain.Again: "<1m", domain.Hard: "6m", domain.Good: "1d", domain.Easy: "4d"}
 	if !reflect.DeepEqual(review.Intervals, wantIntervals) {
 		t.Errorf("intervals = %v, want %v", review.Intervals, wantIntervals)
 	}

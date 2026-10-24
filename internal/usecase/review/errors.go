@@ -31,7 +31,7 @@ func (e *GradingFailedError) Error() string { return "grading failed: " + e.Reas
 
 var (
 	// ErrUnknownDeck is a deck name Anki doesn't have.
-	ErrUnknownDeck = errors.New("нет такой колоды")
+	ErrUnknownDeck = errors.New("no such deck")
 	// ErrNotReady means the grades are still being made.
 	ErrNotReady = errors.New("results not ready")
 )

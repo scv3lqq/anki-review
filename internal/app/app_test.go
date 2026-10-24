@@ -79,7 +79,7 @@ func TestReviewPass(t *testing.T) {
 		fakeanki.Card{ID: 1, Deck: "Tech::Go", Question: "What does <code>defer</code> do?", Answer: "Runs the call when the function returns", Reps: 2, Mod: 10},
 		fakeanki.Card{ID: 2, Deck: "Tech::Go", Question: "Zero value of a map?", Answer: "nil", New: true},
 		fakeanki.Card{ID: 3, Deck: "Tech::Go", Question: "Is a nil map writable?", Answer: "No, it panics", Reps: 1, Mod: 20},
-		fakeanki.Card{ID: 4, Deck: "English", Question: "arrange (verb)", Answer: "организовать"},
+		fakeanki.Card{ID: 4, Deck: "English", Question: "arrange (verb)", Answer: "to put in order"},
 	)
 	bin, calls := fakeclaude.Use(t, fakeclaude.Good)
 	dataDir := filepath.Join(t.TempDir(), "data")

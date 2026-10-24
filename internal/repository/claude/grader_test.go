@@ -132,10 +132,10 @@ func TestPrompt(t *testing.T) {
 		want []string
 	}{
 		{domain.KindKnowledge, []string{
-			"## Карточки (2)",
-			"### 1 (новая)\nТема: Go Channels\nВопрос: What does `close` do?\nЭталон: Marks the channel closed\nМой ответ: no more sends / receivers drain\n",
-			"### 4\nТема: MVCC",
-			"Мой ответ: ?",
+			"## Cards (2)",
+			"### 1 (new)\nTopic: Go Channels\nQuestion: What does `close` do?\nAnswer key: Marks the channel closed\nMy answer: no more sends / receivers drain\n",
+			"### 4\nTopic: MVCC",
+			"My answer: ?",
 		}},
 		{domain.KindLanguage, []string{
 			"## Cards (2)",

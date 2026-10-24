@@ -18,8 +18,6 @@ var (
 	reCloze   = regexp.MustCompile(`data-cloze="([^"]*)"`)
 	reAnswer  = regexp.MustCompile(`(?i)<hr id=answer>`)
 	reBidi    = regexp.MustCompile(`\p{Cf}`)
-	reUnit    = regexp.MustCompile(`(\d)(mo|s|m|h|d|y)$`)
-	unitsRu   = map[string]string{"s": "с", "m": "м", "h": "ч", "d": "д", "mo": "мес", "y": "г"}
 	nbspSpace = strings.NewReplacer("\u00a0", " ")
 )
 
@@ -60,7 +58,7 @@ func render(c cardInfo) (question, back string) {
 		}
 		lines := strings.Split(htmlToText(withCode(c.Answer)), "\n")
 		// the first line is the filled-in sentence, the rest is Back Extra
-		return question, strings.Join(append([]string{"Пропуск: " + strings.Join(answers, ", ")}, lines[1:]...), "\n")
+		return question, strings.Join(append([]string{"Gap: " + strings.Join(answers, ", ")}, lines[1:]...), "\n")
 	}
 	after := c.Answer
 	if parts := reAnswer.Split(c.Answer, 2); len(parts) == 2 {
@@ -70,13 +68,9 @@ func render(c cardInfo) (question, back string) {
 }
 
 // buttonLabel cleans the interval Anki prints on an answer button: AnkiConnect wraps it in bidi
-// isolates, and the units are shown in Russian like the rest of the page.
+// isolates, which would garble the label on the page.
 func buttonLabel(label string) string {
-	label = reBidi.ReplaceAllString(label, "")
-	return reUnit.ReplaceAllStringFunc(label, func(m string) string {
-		sub := reUnit.FindStringSubmatch(m)
-		return sub[1] + unitsRu[sub[2]]
-	})
+	return reBidi.ReplaceAllString(label, "")
 }
 
 // escapeDeck quotes a deck name for Anki search, where `*`, `_` and `"` are syntax.

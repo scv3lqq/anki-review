@@ -130,7 +130,7 @@ var now = time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
 
 func items() []domain.Item {
 	return []domain.Item{
-		{N: 1, CardID: 10, Reps: 2, Mod: 100, Deck: "Tech::Go", Topic: "Go Channels", Question: "q1", Back: "k1", Intervals: map[domain.Grade]string{domain.Good: "1д"}},
+		{N: 1, CardID: 10, Reps: 2, Mod: 100, Deck: "Tech::Go", Topic: "Go Channels", Question: "q1", Back: "k1", Intervals: map[domain.Grade]string{domain.Good: "1d"}},
 		{N: 2, CardID: 20, Reps: 0, Mod: 200, Deck: "Tech::Go", Topic: "Go Maps", Question: "q2", Back: "k2", IsNew: true},
 		{N: 3, CardID: 30, Reps: 5, Mod: 300, Deck: "Tech::Go", Topic: "Go Defer", Question: "q3", Back: "k3"},
 	}
@@ -225,7 +225,7 @@ func TestFullPass(t *testing.T) {
 		t.Fatalf("Results().Items = %+v", res.Items)
 	}
 	first := res.Items[0]
-	if first.Grade != domain.Good || first.Ref != "key" || first.Topic != "Go Channels" || first.Intervals[domain.Good] != "1д" {
+	if first.Grade != domain.Good || first.Ref != "key" || first.Topic != "Go Channels" || first.Intervals[domain.Good] != "1d" {
 		t.Errorf("graded item = %+v; knowledge topic must come from the card", first)
 	}
 
@@ -370,7 +370,7 @@ func TestWriteSkipsCardsReviewedElsewhere(t *testing.T) {
 	if want := [][]domain.CardAnswer{{{CardID: 20, Ease: 3}}}; !reflect.DeepEqual(e.anki.answered, want) {
 		t.Errorf("answered = %v, want %v", e.anki.answered, want)
 	}
-	if st := e.svc.Status(); !st.Written || !strings.Contains(st.Message, "пропущено 1") {
+	if st := e.svc.Status(); !st.Written || !strings.Contains(st.Message, "skipped 1") {
 		t.Errorf("Status() = %+v", st)
 	}
 }

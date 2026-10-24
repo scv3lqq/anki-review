@@ -142,7 +142,7 @@ func TestErrors(t *testing.T) {
 		wantCode string
 	}{
 		{"ok", nil, http.StatusOK, ""},
-		{"conflict", &review.ConflictError{Code: review.CodeSession, Message: "другая сессия"}, http.StatusConflict, review.CodeSession},
+		{"conflict", &review.ConflictError{Code: review.CodeSession, Message: "another session"}, http.StatusConflict, review.CodeSession},
 		{"grading failed", fmt.Errorf("wrapped: %w", &review.GradingFailedError{Reason: "limit"}), http.StatusConflict, codeGradeFailed},
 		{"not ready", review.ErrNotReady, http.StatusNoContent, ""},
 		{"unknown deck", review.ErrUnknownDeck, http.StatusBadRequest, ""},

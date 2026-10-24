@@ -68,7 +68,7 @@ func TestNormalizeAnswer(t *testing.T) {
 		{"dash is skip", " - ", ""},
 		{"dash inside stays", "a - b", "a - b"},
 		{"question mark stays", "?", "?"},
-		{"caps runes, not bytes", strings.Repeat("я", MaxAnswerLen+10), strings.Repeat("я", MaxAnswerLen)},
+		{"caps runes, not bytes", strings.Repeat("日", MaxAnswerLen+10), strings.Repeat("日", MaxAnswerLen)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

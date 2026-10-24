@@ -41,7 +41,7 @@ func (g Grade) Ease() int {
 type Kind string
 
 const (
-	// KindKnowledge cards are graded by meaning, feedback in Russian.
+	// KindKnowledge cards are graded by meaning.
 	KindKnowledge Kind = "knowledge"
 	// KindLanguage cards test an exact word or collocation.
 	KindLanguage Kind = "language"
@@ -140,7 +140,7 @@ type Confirmed struct {
 // Status is the outcome of writing a pass to Anki.
 type Status struct {
 	Written bool `json:"written"`
-	// Retry: nothing was written and the owner may press «Записать в Anki» again.
+	// Retry: nothing was written and the owner may press Save to Anki again.
 	Retry   bool   `json:"retry,omitempty"`
 	More    int    `json:"more"`
 	Message string `json:"message"`

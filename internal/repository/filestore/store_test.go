@@ -22,7 +22,7 @@ func TestRoundTrip(t *testing.T) {
 			Kind:      domain.KindKnowledge,
 			Limit:     25,
 			CreatedAt: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC),
-			Items:     []domain.Item{{N: 1, CardID: 10, Back: "key", Intervals: map[domain.Grade]string{domain.Good: "1д"}}},
+			Items:     []domain.Item{{N: 1, CardID: 10, Back: "key", Intervals: map[domain.Grade]string{domain.Good: "1d"}}},
 			Answers:   []domain.Answer{{N: 1, Text: "a"}},
 			Results:   []domain.Result{},
 		}},

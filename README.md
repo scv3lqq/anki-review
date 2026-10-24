@@ -4,7 +4,7 @@ Review your due Anki cards on a web page: type the answers, Claude Code grades t
 card's answer key, you confirm or change every grade, and the grades go back into Anki through its own
 scheduler, the same as pressing the buttons in the reviewer.
 
-The page and the grading feedback are in Russian.
+The page and the grading feedback are in English.
 
 ## How it works
 
@@ -12,12 +12,12 @@ The page and the grading feedback are in Russian.
    cards within the deck's daily limit.
 2. Type the answers, one card at a time or as a list. `?` means "I don't remember", an empty answer
    skips the card (it stays due).
-3. «На проверку» sends the answers. The server grades the whole batch with one `claude -p` call. The
-   answer keys reach the page only now, together with the grades.
-4. Change any grade you disagree with and press «Записать в Anki». The server answers the cards through
+3. **Check answers** sends the answers. The server grades the whole batch with one `claude -p` call.
+   The answer keys reach the page only now, together with the grades.
+4. Change any grade you disagree with and press **Save to Anki**. The server answers the cards through
    AnkiConnect and syncs with AnkiWeb. A card reviewed elsewhere in the meantime is skipped, not
    answered twice.
-5. Take more cards from the same deck («Ещё карточки») or go back to the deck list («Колоды»).
+5. Take more cards from the same deck (**More cards**) or go back to the deck list (**Decks**).
 
 Decks listed in `KNOWLEDGE_DECKS` (top-level names) are graded by meaning. All other decks are graded
 as language cards: the exact word, its form, collocation and spelling count.
@@ -38,7 +38,7 @@ cd anki-review
 make run
 ```
 
-Open <http://127.0.0.1:8767/>, pick a deck and press «Начать».
+Open <http://127.0.0.1:8767/>, pick a deck and press **Start**.
 
 To get a binary instead: `make build`, then run `bin/anki-review`. The page is embedded, the binary
 needs no other files.
@@ -53,9 +53,9 @@ needs no other files.
 | <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd> | send all answers now |
 
 - Typed answers are kept in the browser, so a reload loses nothing.
-- If grading fails (Claude usage limit, timeout), the page says why and offers «Проверить ещё раз».
+- If grading fails (Claude usage limit, timeout), the page says why and offers **Check again**.
 - If Anki refuses the answers because a deck's study screen is open, go back to Anki's deck list and
-  press «Записать в Anki» again.
+  press **Save to Anki** again.
 - A pass left unfinished for 12 hours is dropped on the next visit.
 - The server keeps the current pass in `DATA_DIR`: a restart resumes it, grading or writing included.
 

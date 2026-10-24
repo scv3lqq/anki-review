@@ -34,11 +34,7 @@ function rich(text) {
   return parts.map((part, i) => (i % 2 ? el("code", {}, part) : document.createTextNode(part)));
 }
 
-function plural(n, [one, few, many]) {
-  const d = n % 10, h = n % 100;
-  if (d === 1 && h !== 11) return one;
-  return d >= 2 && d <= 4 && (h < 12 || h > 14) ? few : many;
-}
+const plural = (n, one, many = `${one}s`) => (n === 1 ? one : many);
 
 function autosize(ta) {
   if (FIELD_SIZING) return;
@@ -46,7 +42,7 @@ function autosize(ta) {
   ta.style.height = `${ta.scrollHeight + 2}px`;
 }
 
-const failure = (err) => (err instanceof TypeError ? "Сервер не отвечает." : err.message);
+const failure = (err) => (err instanceof TypeError ? "Server not responding." : err.message);
 
 // ---------- storage: survives a reload, never required ----------
 
@@ -152,8 +148,8 @@ function setView(view) {
 }
 
 async function backToDecks() {
-  if (S.screen === "input" && filled() > 0 && !confirm("Бросить эту пачку? Набранные ответы пропадут.")) return;
-  if (S.screen === "results" && !S.written && !confirm("Оценки ещё не записаны в Anki. Бросить пачку?")) return;
+  if (S.screen === "input" && filled() > 0 && !confirm("Drop this batch? Your typed answers will be lost.")) return;
+  if (S.screen === "results" && !S.written && !confirm("Grades aren't saved to Anki yet. Drop this batch?")) return;
   try {
     // any outcome ends in a reload: it shows whatever the server holds now
     if ((await post("api/reset", { session: S.session })) === "ok") forget(S.session);
@@ -172,7 +168,7 @@ async function showStart() {
   S.message = "";
   $("meta").textContent = "";
   show();
-  $("start-hint").textContent = "Загружаю колоды…";
+  $("start-hint").textContent = "Loading decks…";
   $("start-go").disabled = true;
   try {
     const res = await fetch("api/decks", { cache: "no-store" });
@@ -212,10 +208,10 @@ function renderStart() {
   input.max = String(deck?.due ?? 1);
   input.disabled = !deck || S.starting;
   $("start-go").disabled = !deck || S.starting || !validCount(input.value, deck.due);
-  $("start-go").textContent = S.starting ? "Беру карточки…" : "Начать";
+  $("start-go").textContent = S.starting ? "Taking cards…" : "Start";
   const hint = $("start-hint");
   hint.classList.toggle("bad", Boolean(S.message));
-  hint.textContent = S.message || (deck ? `${deck.name}: сколько карточек взять?` : "");
+  hint.textContent = S.message || (deck ? `${deck.name}: how many cards to take?` : "");
 }
 
 async function startPass() {
@@ -259,10 +255,10 @@ function renderProgress() {
   $("progress").replaceChildren(...S.cards.map((c, i) => el("button", {
     type: "button",
     class: i === S.idx ? "current" : cardState(c.n),
-    "aria-label": `Карточка ${i + 1}`,
+    "aria-label": `Card ${i + 1}`,
     onclick: () => go(i),
   }, el("i"))));
-  $("count").textContent = `${filled()} из ${S.cards.length}`;
+  $("count").textContent = `${filled()} of ${S.cards.length}`;
 }
 
 function renderCard() {
@@ -277,7 +273,7 @@ function renderCard() {
   ta.value = S.answers[card.n] ?? "";
   autosize(ta);
   $("prev").disabled = S.idx === 0;
-  $("next").textContent = S.idx === S.cards.length - 1 ? "На проверку" : "Дальше →";
+  $("next").textContent = S.idx === S.cards.length - 1 ? "Check answers" : "Next →";
   ta.focus();
 }
 
@@ -354,7 +350,7 @@ function numClass(n) {
 
 function renderListBar() {
   const done = filled();
-  $("list-count").textContent = `${done} из ${S.cards.length} отвечено`;
+  $("list-count").textContent = `${done} of ${S.cards.length} answered`;
   $("list-mini").style.width = `${(done / S.cards.length) * 100}%`;
 }
 
@@ -362,7 +358,7 @@ function renderList() {
   const fields = [];
   $("rows").replaceChildren(...S.cards.map((card, i) => {
     const num = el("span", { class: `num ${numClass(card.n)}` }, pad(i + 1));
-    const ta = el("textarea", { rows: 1, placeholder: "ответ · ? не помню · пусто: пропуск", "aria-label": `Ответ ${i + 1}`, spellcheck: "false" });
+    const ta = el("textarea", { rows: 1, placeholder: "answer · ? don't know · empty: skip", "aria-label": `Answer ${i + 1}`, spellcheck: "false" });
     ta.value = S.answers[card.n] ?? "";
     ta.addEventListener("input", () => {
       S.answers[card.n] = ta.value;
@@ -395,13 +391,13 @@ $("list-submit").addEventListener("click", () => submit());
 function renderChecking(note, bad = false) {
   const done = filled();
   const skipped = S.cards.length - done;
-  const counts = [`${done} ${plural(done, ["ответ", "ответа", "ответов"])}`];
-  if (skipped) counts.push(`${skipped} ${plural(skipped, ["пропуск", "пропуска", "пропусков"])}`);
-  $("check-title").textContent = S.gradeError ? "Проверка не удалась" : "Claude сверяет ответы";
+  const counts = [`${done} ${plural(done, "answer")}`];
+  if (skipped) counts.push(`${skipped} skipped`);
+  $("check-title").textContent = S.gradeError ? "Check failed" : "Claude is checking your answers";
   $("pulse").hidden = Boolean(S.gradeError);
   $("retry").hidden = !S.gradeError;
   const sub = $("check-sub");
-  sub.textContent = note ?? `${counts.join(" · ")}. Страница обновится сама…`;
+  sub.textContent = note ?? `${counts.join(" · ")}. The page updates on its own…`;
   sub.classList.toggle("bad", bad);
 }
 
@@ -423,7 +419,7 @@ async function submit() {
     if ((await post("api/answers", { session: S.session, answers })) === "session") return location.reload();
     pollResults();
   } catch {
-    renderChecking("Сервер не отвечает. Ответы сохранены в этом браузере: обнови страницу позже.", true);
+    renderChecking("Server not responding. Your answers are saved in this browser: reload the page later.", true);
   }
 }
 
@@ -440,7 +436,7 @@ async function pollResults() {
       }
       fails = 0;
     } catch {
-      if (++fails === 3) renderChecking("Сервер не отвечает, жду…", true);
+      if (++fails === 3) renderChecking("Server not responding, waiting…", true);
     }
     await sleep(POLL_MS);
   }
@@ -490,7 +486,7 @@ function resultRow(item) {
   const question = el("span", { class: "rq" }, ...rich(item.question));
   if (item.skipped) {
     return el("li", { class: "res skipped" },
-      el("div", { class: "res-head" }, num, question, el("span", { class: "ivl" }, "в очереди"), el("span", { class: "badge skip" }, "пропуск")));
+      el("div", { class: "res-head" }, num, question, el("span", { class: "ivl" }, "still due"), el("span", { class: "badge skip" }, "skipped")));
   }
   const grade = S.grades[item.n];
   const open = Boolean(S.open[item.n]);
@@ -505,10 +501,10 @@ function resultRow(item) {
     },
   }, num, question, el("span", { class: "ivl" }, interval ? `→ ${interval}` : ""), el("span", { class: `badge ${grade.toLowerCase()}` }, grade));
   const facts = el("dl", { class: "kv" },
-    el("dt", {}, "Ты"), el("dd", { class: "you" }, item.answer === "?" ? "не помню" : item.answer),
-    item.mistake && [el("dt", {}, "Ошибка"), el("dd", { class: "err" }, ...rich(item.mistake))],
-    item.ref && [el("dt", {}, "Эталон"), el("dd", {}, ...rich(item.ref))],
-    item.note && [el("dt", {}, "Заметка"), el("dd", { class: "note" }, ...rich(item.note))]);
+    el("dt", {}, "You"), el("dd", { class: "you" }, item.answer === "?" ? "don't know" : item.answer),
+    item.mistake && [el("dt", {}, "Mistake"), el("dd", { class: "err" }, ...rich(item.mistake))],
+    item.ref && [el("dt", {}, "Key"), el("dd", {}, ...rich(item.ref))],
+    item.note && [el("dt", {}, "Note"), el("dd", { class: "note" }, ...rich(item.note))]);
   const buttons = el("div", { class: "grades" }, ...GRADES.map((g) => el("button", {
     type: "button",
     class: `g ${g.toLowerCase()}${g === grade ? " sel" : ""}`,
@@ -527,7 +523,7 @@ function renderResults() {
   const graded = S.results.filter((i) => !i.skipped);
   const count = Object.fromEntries(GRADES.map((g) => [g, 0]));
   for (const item of graded) count[S.grades[item.n]] += 1;
-  $("res-label").textContent = `Проверено ${graded.length} из ${S.results.length}`;
+  $("res-label").textContent = `Checked ${graded.length} of ${S.results.length}`;
   $("counters").replaceChildren(...GRADES.map((g) => el("div", { class: `counter ${g.toLowerCase()}` }, el("b", {}, String(count[g])), el("span", {}, g))));
   $("strip").replaceChildren(...S.results.map((i) => el("i", { class: i.skipped ? "" : S.grades[i.n].toLowerCase() })));
   const weak = [...new Set(graded
@@ -543,7 +539,7 @@ function renderResults() {
   $("done").hidden = !S.written;
   $("write").hidden = S.written;
   $("write").disabled = S.locked;
-  $("write").textContent = S.locked ? "Записываю…" : "Записать в Anki";
+  $("write").textContent = S.locked ? "Saving…" : "Save to Anki";
   $("res-wrap").classList.toggle("has-more", more);
   $("take").hidden = !more;
   $("to-decks").hidden = !S.written || more;
@@ -554,11 +550,11 @@ function renderResults() {
   // never overwrite what is being typed
   if (more && document.activeElement !== input) input.value = String(batchSize(S.more));
   $("more").disabled = S.taking || !validCount(input.value, S.more);
-  $("more").textContent = S.taking ? "Беру карточки…" : "Ещё карточки";
+  $("more").textContent = S.taking ? "Taking cards…" : "More cards";
   if (S.message) hint.textContent = S.message;
-  else if (more) hint.textContent = `В колоде ещё ${S.more} ${plural(S.more, ["карточка", "карточки", "карточек"])}, сколько взять?`;
-  else if (S.written) hint.textContent = "По этой колоде на сегодня всё.";
-  else hint.textContent = S.locked ? "Записываю оценки в Anki." : "Не согласен с оценкой? Поменяй, твоя важнее.";
+  else if (more) hint.textContent = `${S.more} more ${plural(S.more, "card")} in this deck, how many to take?`;
+  else if (S.written) hint.textContent = "That's all for this deck today.";
+  else hint.textContent = S.locked ? "Saving grades to Anki." : "Disagree with a grade? Change it, yours wins.";
 }
 
 async function takeMore() {
@@ -611,7 +607,7 @@ async function write() {
     pollStatus();
   } catch {
     S.locked = false;
-    S.message = "Сервер не отвечает, оценки не отправлены.";
+    S.message = "Server not responding, grades not sent.";
     renderResults();
   }
 }
@@ -626,7 +622,7 @@ async function pollStatus() {
         S.message = status.message ?? "";
         S.more = status.more ?? 0;
         S.written = Boolean(status.written);
-        // nothing was written: the grades unlock and «Записать в Anki» can be pressed again
+        // nothing was written: the grades unlock and Save to Anki can be pressed again
         if (!S.written && status.retry) S.locked = false;
         renderResults();
         if (S.written || !S.locked) {

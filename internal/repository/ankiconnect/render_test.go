@@ -47,7 +47,7 @@ func TestRender(t *testing.T) {
 				Answer:    "WAL is written before data pages<br>Back extra line",
 			},
 			wantQuestion: "WAL is written [...] data pages",
-			back:         "Пропуск: before\nBack extra line",
+			back:         "Gap: before\nBack extra line",
 		},
 		{
 			name:         "answer without separator is used whole",
@@ -68,13 +68,10 @@ func TestRender(t *testing.T) {
 
 func TestButtonLabel(t *testing.T) {
 	tests := []struct{ in, want string }{
-		{"\u206810m\u2069", "10м"},
-		{"\u20681d\u2069", "1д"},
-		{"2.5mo", "2.5мес"},
-		{"1y", "1г"},
-		{"<1m", "<1м"},
-		{"30s", "30с"},
-		{"4h", "4ч"},
+		{"\u206810m\u2069", "10m"},
+		{"\u20681d\u2069", "1d"},
+		{"2.5mo", "2.5mo"},
+		{"<1m", "<1m"},
 		{"soon", "soon"},
 	}
 	for _, tt := range tests {

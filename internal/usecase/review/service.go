@@ -23,7 +23,7 @@ const (
 	defaultBatch = 25
 	maxBatch     = 500
 	writeTimeout = 5 * time.Minute
-	msgQueueBusy = "Anki держит очередь открытой колоды: выйди в список колод и нажми «Записать в Anki» ещё раз"
+	msgQueueBusy = "A deck's study screen is open in Anki: go back to the deck list there and press Save to Anki again"
 )
 
 // Options tune a Service; zero values get defaults.
@@ -153,7 +153,7 @@ func (s *Service) Start(ctx context.Context, deck string, count int) error {
 	s.expireLocked()
 	if st := s.pass.Stage(); st != domain.StageIdle && st != domain.StageWritten {
 		s.mu.Unlock()
-		return conflict(CodeBusy, "пачка уже идёт")
+		return conflict(CodeBusy, "a batch is already in progress")
 	}
 	from := s.pass
 	s.mu.Unlock()
@@ -169,7 +169,7 @@ func (s *Service) More(ctx context.Context, session string, count int) error {
 	}
 	if s.pass.Stage() != domain.StageWritten || s.pass.Status.More <= 0 {
 		s.mu.Unlock()
-		return conflict(CodeEmpty, "эта пачка ещё не записана или карточек не осталось")
+		return conflict(CodeEmpty, "this batch isn't saved yet or no cards are left")
 	}
 	from, deck := s.pass, s.pass.Deck
 	if count <= 0 {
@@ -187,7 +187,7 @@ func (s *Service) SubmitAnswers(session string, answers map[int]string) error {
 		return err
 	}
 	if s.pass.Stage() != domain.StageInput {
-		return conflict(CodeSent, "ответы уже отправлены")
+		return conflict(CodeSent, "answers already sent")
 	}
 	s.pass.SetAnswers(answers)
 	err := s.saveLocked()
@@ -203,7 +203,7 @@ func (s *Service) Regrade(session string) error {
 		return err
 	}
 	if s.pass.Stage() != domain.StageChecking || s.grading || s.pass.GradeError == "" {
-		return conflict(CodeSent, "проверка уже идёт")
+		return conflict(CodeSent, "grading is already running")
 	}
 	s.pass.GradeError = ""
 	err := s.saveLocked()
@@ -219,7 +219,7 @@ func (s *Service) Confirm(session string, grades map[int]domain.Grade) error {
 		return err
 	}
 	if s.pass.Stage() != domain.StageResults || s.applying {
-		return conflict(CodeSent, "оценки уже отправлены")
+		return conflict(CodeSent, "grades already sent")
 	}
 	s.pass.Confirm(grades)
 	err := s.saveLocked()
@@ -235,7 +235,7 @@ func (s *Service) Reset(session string) error {
 		return err
 	}
 	if s.grading || s.applying || s.taking {
-		return conflict(CodeBusy, "подожди: идёт проверка или запись")
+		return conflict(CodeBusy, "wait: grading or saving is in progress")
 	}
 	s.opts.Log.Info().Str("session", s.pass.Session).Msg("pass dropped")
 	s.pass = nil
@@ -244,7 +244,7 @@ func (s *Service) Reset(session string) error {
 
 func (s *Service) checkSessionLocked(session string) error {
 	if s.pass == nil || s.pass.Session != session {
-		return conflict(CodeSession, "другая сессия")
+		return conflict(CodeSession, "another session")
 	}
 	return nil
 }
@@ -271,7 +271,7 @@ func (s *Service) take(ctx context.Context, from *domain.Pass, deck string, coun
 	s.mu.Lock()
 	if s.taking {
 		s.mu.Unlock()
-		return conflict(CodeSent, "пачка уже берётся")
+		return conflict(CodeSent, "cards are already being taken")
 	}
 	s.taking = true
 	s.mu.Unlock()
@@ -294,14 +294,14 @@ func (s *Service) take(ctx context.Context, from *domain.Pass, deck string, coun
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pass != from {
-		return conflict(CodeSession, "другая сессия")
+		return conflict(CodeSession, "another session")
 	}
 	if len(items) == 0 {
 		if from != nil && from.Status != nil {
 			from.Status.More = 0
 			_ = s.saveLocked()
 		}
-		return conflict(CodeEmpty, "в колоде нечего повторять")
+		return conflict(CodeEmpty, "nothing to review in this deck")
 	}
 	s.pass = &domain.Pass{
 		Session:   s.opts.NewSession(),
@@ -412,25 +412,25 @@ func (s *Service) write(ctx context.Context, items []domain.Item, confirmed []do
 
 	var notes []string
 	if skipped > 0 {
-		notes = append(notes, fmt.Sprintf("пропущено %d: их уже повторили или изменили", skipped))
+		notes = append(notes, fmt.Sprintf("skipped %d: already reviewed or changed", skipped))
 	}
 	if failed := len(plan) - countTrue(ok); failed > 0 {
-		notes = append(notes, fmt.Sprintf("Anki не принял %d", failed))
+		notes = append(notes, fmt.Sprintf("Anki rejected %d", failed))
 	}
 	if s.opts.Sync {
 		if err := s.anki.Sync(ctx); err != nil {
-			notes = append(notes, "синхронизация не прошла: "+err.Error())
+			notes = append(notes, "sync failed: "+err.Error())
 		}
 	}
 	more, err := s.anki.DueCount(ctx, deck)
 	if err != nil {
-		notes = append(notes, "не узнал, сколько карточек осталось: "+err.Error())
+		notes = append(notes, "couldn't count the cards left: "+err.Error())
 	}
 	return domain.Status{Written: true, More: more, Message: strings.Join(notes, "; ")}
 }
 
 func refused(err error) domain.Status {
-	return domain.Status{Retry: true, Message: "Не записано в Anki: " + err.Error()}
+	return domain.Status{Retry: true, Message: "Not saved to Anki: " + err.Error()}
 }
 
 func countTrue(ok []bool) int {
