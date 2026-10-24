@@ -43,6 +43,10 @@ Open <http://127.0.0.1:8767/>, pick a deck and press **Start**.
 To get a binary instead: `make build`, then run `bin/anki-review`. The page is embedded, the binary
 needs no other files.
 
+With Claude Code: open the clone in Claude Code and run `/setup-anki-review`, or just ask it to set
+the app up. It checks the requirements, builds, asks which decks are knowledge decks and starts the
+server. `/setup-anki-review check` only reports what is missing.
+
 ## Use
 
 | Key | Action |
