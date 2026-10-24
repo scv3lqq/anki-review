@@ -6,6 +6,27 @@ scheduler, the same as pressing the buttons in the reviewer.
 
 The page and the grading feedback are in English.
 
+## Screenshots
+
+The decks, cards, answers and grades in these shots are a made-up demo.
+
+The deck list with today's due and new cards; a parent deck takes its subdecks along.
+
+![Deck list with due and new card counts](assets/screenshots/decks.png)
+
+One card at a time. Code in backticks on a card renders as code, new cards are marked.
+
+![Typing the answer to a card](assets/screenshots/card.png)
+
+The same batch as a list, all answers on one screen.
+
+![All cards of the batch as a list](assets/screenshots/list.png)
+
+The grades: counts, weak spots, and per card your answer, the mistake, the answer key and a note.
+Each grade button shows the interval Anki will set; change any grade before **Save to Anki**.
+
+![Graded answers with the grade buttons](assets/screenshots/results.png)
+
 ## How it works
 
 1. Pick a deck and how many cards to take. Cards come in Anki's order: learning, reviews, then new
@@ -115,6 +136,7 @@ make check   # golangci-lint v2 and go test -race
 | `internal/handler/httpapi` | JSON API, static page, host guard |
 | `internal/app` | wiring and the HTTP server |
 | `web` | the page: plain HTML, CSS and JS, embedded into the binary |
+| `assets/screenshots` | README screenshots of a made-up demo |
 
 Tests fake Anki with an in-memory AnkiConnect server and Claude with the test binary itself
 (`internal/testutil`), so `make check` needs neither.
