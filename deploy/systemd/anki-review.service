@@ -1,4 +1,4 @@
-# Template: install.sh replaces @DEPLOY_DIR@ with the deploy dir and installs the result.
+# Installed by install.sh from the deploy kit, which fills in the deploy dir below.
 [Unit]
 Description=anki-review: grade typed Anki answers with Claude Code
 After=network-online.target docker.service
