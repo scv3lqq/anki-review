@@ -68,6 +68,13 @@ With Claude Code: open the clone in Claude Code and run `/setup-anki-review`, or
 the app up. It checks the requirements, builds, asks which decks are knowledge decks and starts the
 server. `/setup-anki-review check` only reports what is missing.
 
+## Run on a server
+
+[deploy/README.md](deploy/README.md) runs it on a Linux server: Anki headless in Docker, the app as a
+hardened systemd service behind your own reverse proxy. With Claude Code, `/setup-anki-review server`
+does the whole deploy over ssh; you type only the AnkiWeb password, the browser authorization of
+`claude setup-token` and the sudo password. `/setup-anki-review server-update` ships a new build.
+
 ## Use
 
 | Key | Action |
@@ -86,7 +93,8 @@ server. `/setup-anki-review check` only reports what is missing.
 
 ## Configuration
 
-Environment variables, all optional.
+Environment variables, all optional. To keep them in a file, `cp .env.example .env` and edit it:
+`make run` reads `.env` (the binary itself reads only its environment).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -137,6 +145,8 @@ make check   # golangci-lint v2 and go test -race
 | `internal/app` | wiring and the HTTP server |
 | `web` | the page: plain HTML, CSS and JS, embedded into the binary |
 | `assets/screenshots` | README screenshots of a made-up demo |
+| `deploy` | the server deploy kit, see its README |
+| `.claude/skills/setup-anki-review` | the Claude Code setup skill and its helper scripts |
 
 Tests fake Anki with an in-memory AnkiConnect server and Claude with the test binary itself
 (`internal/testutil`), so `make check` needs neither.

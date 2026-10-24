@@ -1,31 +1,40 @@
 ---
 name: setup-anki-review
-description: Set up, check or run anki-review locally (macOS, Linux) from a fresh clone. Checks Go, Anki with AnkiConnect and Claude Code, tests, builds, picks knowledge decks, starts and verifies the server; autostart on request. Use for "set up anki-review", "install it", "run it locally", "check my setup".
-argument-hint: "[check|autostart]"
-allowed-tools: Read, Bash(.claude/skills/setup-anki-review/check.sh:*), Bash(go:*), Bash(make:*), Bash(curl -sS --fail-with-body:*), Bash(claude -p --safe-mode:*), Bash(git check-ignore:*), Bash(plutil -lint:*)
+description: Set up anki-review from a fresh clone, locally (macOS, Linux) or on a Linux server over ssh with headless Anki, and update that server. Fixes prerequisites, writes .env, builds, starts, verifies. Use for "set up anki-review", "deploy to my server", "update the server", "check my setup".
+argument-hint: "[check|local|server|server-update]"
+allowed-tools: Read, Edit, Bash(.claude/skills/setup-anki-review/check.sh:*), Bash(.claude/skills/setup-anki-review/server.sh:*), Bash(.claude/skills/setup-anki-review/install-ankiconnect.sh:*), Bash(make:*), Bash(go:*), Bash(curl -sS --fail-with-body:*), Bash(open vnc://127.0.0.1:5901:*), Bash(tmux capture-pane:*), Bash(cp .env.example .env:*), Bash(git check-ignore:*), Bash(claude -p --safe-mode:*), Bash(brew install go:*), Bash(plutil -lint:*)
 ---
 
 # Set up anki-review
 
 Argument: $ARGUMENTS
 
-No argument: steps 1 to 4, then offer step 5. `check`: step 1, then the report; nothing
-changes. `autostart`: steps 1 and 3, then step 5 (no `bin/anki-review` yet: step 2 first).
-README.md owns the facts (requirements, variables), `internal/config` wins where they
-disagree; this skill only orders them. Run every command from the repository root.
+- `local` (also no argument): this machine, steps 1 to 6 below.
+- `server`, `server-update`: a Linux server, [references/server.md](references/server.md).
+- `check`: step 1, plus `server.sh status` and `server.sh kit-diff` when `DEPLOY_SSH` is set;
+  then the report. Nothing changes.
 
-Rules for every step:
+README.md and deploy/README.md own the facts, `internal/config` and the deploy scripts win where
+they disagree; this skill only orders them. Run every command from the repository root.
 
-- Nothing gets installed, logged in, started, stopped or written outside the checkout without
-  the user's yes. GUI apps, the Anki add-on and logins are always the user's to do.
-- Setup never writes to the user's Anki: no `POST` to the server's API (`/api/confirm`
-  above all), never the page's button that writes grades, no AnkiConnect action besides the
-  read-only ones `check.sh` sends (`version`, `deckNames`). Starting the server can write a
-  saved pass on its own: see step 4.
-- No secret (`ANKI_CONNECT_KEY`) in a tracked file. Before creating any file inside the
-  checkout, `git check-ignore -q <path>` must succeed.
+Rules for every mode:
 
-Out of scope: deployment to a server or VPS (headless Anki, reverse proxy).
+- Claude does every step itself. The user only types the AnkiWeb password (server), authorizes
+  `claude setup-token` in the browser (server) and types the sudo password (server, once). Logging
+  in, installing a GUI app and anything with a password stay theirs; installs Claude runs (Go,
+  AnkiConnect) take one yes first.
+- Secrets (AnkiConnect key, VNC password, Claude token) never appear in argv, in output or in this
+  conversation: they move through pipes and files inside the helper scripts. Don't `cat` them.
+  ssh, scp, the clipboard and AppleScript run only inside `server.sh`, so no raw `ssh` or `curl`
+  call is pre-approved: any other one gets a permission prompt.
+- Setup never writes to the user's Anki: no `POST` to the API (`/api/confirm` above all), never the
+  page's button that writes grades, AnkiConnect only through the scripts here (`version`,
+  `deckNames`). Starting a server can resume a saved pass on its own: step 4.
+- Settings live in `.env` (gitignored; `make run` reads it, the scripts here too, and it wins over
+  the environment). Missing it: `git check-ignore -q .env` must succeed, then
+  `cp .env.example .env`. Missing values: ask for all of them in one message, then set the lines
+  with Edit. Values can't hold `#` or `$` (make syntax). `ANKI_CONNECT_KEY` is the user's to type
+  into `.env`. Never commit `.env`; never put a secret into a tracked file.
 
 ## 1. Prerequisites (read-only)
 
@@ -33,130 +42,94 @@ Out of scope: deployment to a server or VPS (headless Anki, reverse proxy).
 .claude/skills/setup-anki-review/check.sh
 ```
 
-One line per item (`ok`, `info`, `warn`, `FAIL`), exit 1 on any `FAIL`. It reads the same
-environment variables as the server and validates them by the same rules, uses no Claude
-quota, does not contact a running anki-review, and prints only the stage of a saved pass.
-
-Then the Claude smoke test, the only real proof that grading can run. Tell the user it uses
-a little of their Claude quota, then:
+One line per item (`ok`, `info`, `warn`, `FAIL`), exit 1 on any `FAIL`. It validates the settings
+by the server's rules, uses no Claude quota, does not contact a running anki-review, and prints
+only the stage of a saved pass. Then the Claude smoke test, the proof that grading can run; say it
+uses a little of the user's Claude quota:
 
 ```sh
 claude -p --safe-mode --tools "" --no-session-persistence "Reply with OK"
 ```
 
-Expected: `OK` (add `--model "$CLAUDE_MODEL"` when it is set). An auth or usage-limit error
-here is what grading would hit.
-
-For each `FAIL` or `warn`, give the fix from this table; offer to run a `brew install` for a
-CLI tool, only after a yes.
+Expected `OK` (add `--model "$CLAUDE_MODEL"` when set). Fix every `FAIL` and `warn`:
 
 | Item | Fix |
 | --- | --- |
-| config | Fix the named variable: the server exits on it at start |
-| go | macOS `brew install go`; Linux the tarball from <https://go.dev/doc/install> (distro packages lag). Go 1.21+ fetches the go.mod toolchain itself unless `GOTOOLCHAIN=local` |
-| anki | <https://apps.ankiweb.net/> (macOS also `brew install --cask anki`, Linux also Flatpak `net.ankiweb.Anki`). The current AnkiConnect needs Anki 26.08 or later |
-| ankiconn unreachable | Start Anki and open the profile to review. Add-on not found: Tools, Add-ons, Get Add-ons, code `2055492159`, then restart Anki. Found: restart Anki, and check that `webBindPort` (Tools, Add-ons, AnkiConnect, Config) matches `ANKI_CONNECT_URL` |
-| ankiconn key | `ANKI_CONNECT_KEY` must equal the add-on's `apiKey`, unset when the add-on has none |
-| claude missing | `curl -fsSL https://claude.ai/install.sh \| bash` or `brew install --cask claude-code` (<https://code.claude.com/docs/en/setup>) |
-| claude login, smoke test | The user runs `claude` in a terminal and follows the browser login (or `claude auth login`); `ANTHROPIC_API_KEY` works too. Usage limit: wait for the reset |
-| lint | Optional: `brew install golangci-lint` (v2). Without it step 2 runs `go test ./...` |
+| config | Correct the named value in `.env` |
+| go | macOS with Homebrew: one AskUserQuestion, then `brew install go`. Otherwise <https://go.dev/doc/install>. Go 1.21+ fetches the go.mod toolchain itself unless `GOTOOLCHAIN=local` |
+| anki | The user installs it: <https://apps.ankiweb.net/> (or `brew install --cask anki`, Flatpak `net.ankiweb.Anki`). AnkiConnect needs Anki 26.08 or later |
+| ankiconn, add-on not found | Anki `ok`: one AskUserQuestion, then `.claude/skills/setup-anki-review/install-ankiconnect.sh` (the release pinned in `deploy/anki/Dockerfile`, sha256 checked, into `addons21/2055492159`); the user restarts Anki; rerun `check.sh`. Or the user installs it: Tools, Add-ons, Get Add-ons, `2055492159` |
+| ankiconn, add-on found | Anki is closed or not restarted since the install: the user starts it. Still failing: `webBindPort` in the add-on config must match `ANKI_CONNECT_URL` |
+| ankiconn key | `ANKI_CONNECT_KEY` in `.env` must equal the add-on's `apiKey`, empty when it has none |
+| claude | Not logged in or smoke test fails: the user runs `claude` in a terminal and logs in; usage limit: wait for the reset |
+| lint | Optional: `brew install golangci-lint` (v2); without it step 2 runs `go test ./...` |
 | decks | Step 3 |
 | port, data | Step 4 |
 
-`config` or `go` FAIL: stop before step 2. `ankiconn` FAIL: step 2 can run, steps 3 and 4
-wait until the user fixes it and `check.sh` passes. `claude` FAIL: go on, but grading fails
-until it is fixed. Mode `check`: go to step 6.
+`config` or `go` FAIL stops before step 2; `ankiconn` FAIL stops before step 3; a `claude` FAIL
+lets setup go on, grading fails until it is fixed. Mode `check`: the report (step 6).
 
 ## 2. Test and build
 
 ```sh
 make check      # when `lint` is ok (its -race needs a C compiler); otherwise: go test ./...
-make build      # bin/anki-review: static, the page embedded
+make build      # bin/anki-review: static, the page embedded (for autostart)
 ```
 
-When the `port` line names this checkout's `bin/anki-review` as already serving: skip
-`make build` if `build` says up to date; otherwise ask first, since it replaces the binary
-under the running server (which keeps the old code until restarted).
-
-Tests fake Anki and Claude, so they need neither. A failing test stops the run: show it,
-don't build around it.
+A failing test stops the run: show it, don't build around it. When this checkout's
+`bin/anki-review` already serves the port, skip `make build` if `build` says up to date,
+otherwise ask: it replaces the binary under the running server.
 
 ## 3. Configure
 
-Defaults fit a stock Anki with AnkiConnect on 8765 (README `## Configuration` lists every
-variable). The one real choice is `KNOWLEDGE_DECKS`: top-level decks graded by meaning
-(facts, concepts); every other deck is graded as language cards, where the exact word, its
-form and spelling count. Default `Tech,Career`.
+The one real choice is `KNOWLEDGE_DECKS`: top-level decks graded by meaning (facts, concepts);
+every other deck is graded as language cards, where the exact word, form and spelling count.
 
 ```sh
 .claude/skills/setup-anki-review/check.sh decks
 ```
 
-Prints each top-level deck with the kind it gets now (`knowledge`, `language`) and
-`missing` for a `KNOWLEDGE_DECKS` name with no such deck. Explain the two kinds in one line
-each, then ask which decks are knowledge decks (one AskUserQuestion, multiSelect; with more
-than 4 decks offer the likeliest 4, the user types the rest in Other).
-
-- Same set as the default: nothing to set.
-- Otherwise: the server reads only its environment (it loads no `.env` file), so give the
-  exact line, names as Anki shows them, case-sensitive, comma-separated, single-quoted
-  (a `'` inside a name as `'\''`): `KNOWLEDGE_DECKS='Tech,Career,Books' make run`. A deck
-  name with a comma can't be listed. An empty value means the default; to grade every deck
-  as language: `KNOWLEDGE_DECKS=,`.
-- To keep it: the user adds `export KNOWLEDGE_DECKS='...'` to their shell profile, or it goes
-  into the autostart file of step 5. Don't edit the profile yourself.
-
-Other variables only when they apply: `ANKI_CONNECT_KEY` (step 1 key error), `ANKI_SYNC=false`
-(no AnkiWeb account: the syncs before a pass and after writing would only fail),
-`CLAUDE_MODEL` (for example `sonnet`), `PORT` (step 4).
+Prints each top-level deck with its kind now and `missing` for a configured name with no deck.
+Explain the two kinds in one line each, ask which decks are knowledge decks (one AskUserQuestion,
+multiSelect; more than 4 decks: the likeliest 4, the rest via Other), then set
+`KNOWLEDGE_DECKS=<names, comma-separated, as Anki shows them>` in `.env` (create it as in the
+rules). A name with a comma can't be listed; every deck as language: `KNOWLEDGE_DECKS=,`. Other
+values only when they apply: `ANKI_SYNC=false` (no AnkiWeb account), `CLAUDE_MODEL`, `PORT`.
 
 ## 4. Run and verify
 
-A `data` warn comes first: a saved pass with confirmed grades goes to Anki, and one waiting
-for grading goes to `claude -p`, as soon as the server starts. Tell the user and ask: start
-anyway (they are their own grades), or move `data/state.json` aside first.
+A `data` warn first: a saved pass with confirmed grades goes to Anki, one waiting for grading goes
+to `claude -p`, as soon as a server starts. Tell the user; ask whether to start anyway or move
+`data/state.json` aside.
 
-Then by the step 1 `port` line:
+By the step 1 `port` line:
 
-- free: start `bin/anki-review` with Bash `run_in_background`, the env line of step 3 in
-  front;
-- an anki-review already serving (this checkout's binary, a `make run` or another
-  checkout): start nothing, verify that one. Ask before restarting it when step 2 rebuilt
-  the binary or its `kind`s in `/api/decks` differ from the step 3 choice; a server the user
-  started in a terminal is theirs to restart;
-- another program: ask for a free port, start with `PORT=<port>` and use it below.
+- free: `make run` with Bash `run_in_background` (it reads `.env`);
+- an anki-review already serving: start nothing, verify it. Its `kind`s in `/api/decks` differ
+  from step 3, or step 2 rebuilt it: ask before restarting it (one the user started in a terminal
+  is theirs to restart);
+- another program: ask for a free `PORT`, set it in `.env`, use it below.
 
 ```sh
 curl -sS --fail-with-body --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8767/api/cards
 curl -sS --fail-with-body http://127.0.0.1:8767/api/decks
 ```
 
-Expected: `/api/cards` shows `"stage":"idle"` (another stage: the saved pass was resumed);
-`/api/decks` is `{"decks":[...]}`, the decks with cards due today and their `kind` (empty:
-nothing due). HTTP 502 means AnkiConnect failed: the body says why. If the server exited,
-its output names the cause (port in use, a bad variable).
-
-These two GETs are the whole check: nothing that starts a pass or writes grades.
-
-Give the URL <http://127.0.0.1:8767/>. A server started here lives only as long as this
-session; for a lasting one, `make run` in a terminal, or step 5.
+Expected: `"stage":"idle"` (another stage: a saved pass resumed) and `{"decks":[...]}` with each
+deck's `kind` (empty: nothing due). HTTP 502: AnkiConnect failed, the body says why. Server gone:
+its output names the cause. These two GETs are the whole check. Give the URL
+<http://127.0.0.1:8767/>; this server lives as long as the session (lasting: `make run` in a
+terminal, or step 5).
 
 ## 5. Autostart (only when the user asks)
 
-Needs `bin/anki-review`, and the port free: re-run `check.sh` first. A server this session
-started: stop it. Any other one: ask the user to stop it, or put another `PORT` in the file;
-otherwise the service can't bind and keeps restarting.
+Needs `bin/anki-review` and a free port (rerun `check.sh`; stop the step 4 server first). The file
+names `claude` by absolute path (`command -v claude`; add node's directory to `PATH` if claude came
+from npm), and takes `KNOWLEDGE_DECKS` and the other set values from `.env`. Show it, write it after
+a yes; mode `0600` when it holds `ANKI_CONNECT_KEY`.
 
-launchd and systemd don't use the shell's `PATH`, so the file names `claude` by its absolute
-path (`command -v claude`), plus node's directory in `PATH` if claude came from npm. Fill the
-placeholders: `@REPO@` the checkout, `@CLAUDE_BIN@` and `@CLAUDE_DIR@` the claude binary and
-its directory, `@HOME@` the home directory (absolute paths: neither file expands `~`), `@DECKS@`
-the step 3 value. Add `ANKI_CONNECT_KEY` and other step 3 variables the same way. Show the
-file, write it after a yes; mode `0600` when it holds the key. Anki still has to run for
-reviews; the server starting before it is fine.
-
-macOS, `~/Library/LaunchAgents/local.anki-review.plist` (in values write `&` as `&amp;` and
-`<` as `&lt;`):
+macOS, `~/Library/LaunchAgents/local.anki-review.plist` (absolute paths, `&` as `&amp;`, `<` as
+`&lt;`):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -179,17 +152,12 @@ macOS, `~/Library/LaunchAgents/local.anki-review.plist` (in values write `&` as 
 </plist>
 ```
 
-```sh
-plutil -lint ~/Library/LaunchAgents/local.anki-review.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.anki-review.plist
-launchctl print gui/$(id -u)/local.anki-review | awk '/^\t(state|pid|last exit code) = /'
-```
+`plutil -lint` it, `launchctl bootstrap gui/$(id -u) <plist>`; state:
+`launchctl print gui/$(id -u)/local.anki-review | awk '/^\t(state|pid|last exit code) = /'`.
+Restart after a build: `launchctl kickstart -k gui/$(id -u)/local.anki-review`. Remove:
+`launchctl bootout gui/$(id -u)/local.anki-review`, delete the plist.
 
-Restart after `make build`: `launchctl kickstart -k gui/$(id -u)/local.anki-review`.
-Remove: `launchctl bootout gui/$(id -u)/local.anki-review`, then delete the plist.
-
-Linux, `~/.config/systemd/user/anki-review.service` (each `Environment=` quoted whole, so a
-space in a deck name survives; write `%` as `%%`):
+Linux, `~/.config/systemd/user/anki-review.service` (each `Environment=` quoted whole, `%` as `%%`):
 
 ```ini
 [Unit]
@@ -207,22 +175,16 @@ Restart=on-failure
 WantedBy=default.target
 ```
 
-```sh
-systemd-analyze --user verify ~/.config/systemd/user/anki-review.service
-systemctl --user daemon-reload && systemctl --user enable --now anki-review
-systemctl --user show -p ActiveState -p MainPID anki-review
-```
+`systemd-analyze --user verify` it, `systemctl --user daemon-reload && systemctl --user enable --now
+anki-review`; state: `systemctl --user show -p ActiveState -p MainPID anki-review`; logs: `journalctl
+--user -u anki-review`. Restart: `systemctl --user restart anki-review`. Remove: `systemctl --user
+disable --now anki-review`, delete the unit, `daemon-reload`.
 
-Logs: `journalctl --user -u anki-review`. Restart after `make build`:
-`systemctl --user restart anki-review`. Remove: `systemctl --user disable --now anki-review`,
-delete the unit, `systemctl --user daemon-reload`.
-
-Then verify: `check.sh` shows this checkout's `bin/anki-review` serving with the same pid as
-`launchctl print` or `MainPID`, and the two `curl` checks of step 4 pass.
+Verify: `check.sh` shows this checkout's binary serving with the pid launchd or systemd reports,
+and the two `curl` checks of step 4 pass.
 
 ## 6. Report
 
-Each `check.sh` item and the smoke test as ok, warn or failed (only checks that ran); the
-test and build result; the env line from step 3, if any; the URL and how the server runs
-(started by this session, autostart, already running before, or not running); what is left
-to the user (installs, add-on, login), with the fix from the table.
+Each check as ok, warn or failed (only checks that ran); what Claude installed or wrote (`.env`
+lines, add-on, autostart file); the URL and how the server runs (this session, autostart, already
+running, not running); what is left to the user, with the fix from the table.

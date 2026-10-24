@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Read-only status of everything anki-review needs, from the same environment variables the
-# server reads. It sends AnkiConnect only `version` and `deckNames`, never calls the Claude API
+# Read-only status of everything anki-review needs, from the same settings `make run` sees (.env
+# over the environment). It sends AnkiConnect only `version` and `deckNames`, never calls the Claude API
 # (no quota), never contacts a running anki-review, never starts or stops a process. From the
 # saved pass in DATA_DIR it prints only the stage.
 #
@@ -8,15 +8,9 @@
 #   check.sh decks   top-level Anki decks and the kind the server would grade each as
 set -u
 
-root=$(cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-os=$(uname -s)
-
-trim() {
-  local s=$1
-  s=${s#"${s%%[![:space:]]*}"}
-  s=${s%"${s##*[![:space:]]}"}
-  printf '%s' "$s"
-}
+# shellcheck source=SCRIPTDIR/lib.sh
+. "$(dirname -- "$0")/lib.sh"
+load_dotenv
 
 # Defaults mirror internal/config: a blank value means the default.
 env_or() {
@@ -33,16 +27,6 @@ data_dir=$(env_or DATA_DIR data)
 knowledge=$(env_or KNOWLEDGE_DECKS Tech,Career)
 case $data_dir in /*) ;; *) data_dir=$root/$data_dir ;; esac
 
-fails=0
-line() { printf '%-4s  %-9s %s\n' "$1" "$2" "$3"; }
-ok() { line ok "$1" "$2"; }
-info() { line info "$1" "$2"; }
-warn() { line warn "$1" "$2"; }
-fail() {
-  line FAIL "$1" "$2"
-  fails=$((fails + 1))
-}
-
 # $1 >= $2 for dotted versions; suffixes like rc1 are ignored.
 version_ge() {
   local IFS=. i x y
@@ -57,12 +41,6 @@ version_ge() {
     if ((10#$x < 10#$y)); then return 1; fi
   done
   return 0
-}
-
-# On a Mac without the command line tools /usr/bin/python3 is a stub that opens an installer.
-have_python() {
-  command -v python3 >/dev/null 2>&1 || return 1
-  [ "$os" != Darwin ] || xcode-select -p >/dev/null 2>&1
 }
 
 # The body goes through stdin, so the apiKey never shows up in `ps`.
@@ -156,6 +134,11 @@ Linux) info os "$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | tr -
 *) fail os "$os: this setup covers macOS and Linux only" ;;
 esac
 info repo "$root"
+if [ -f "$root/.env" ]; then
+  info env ".env: $dotenv_count setting(s), they win over the environment as in make run"
+else
+  info env "no .env: environment and defaults (cp .env.example .env to keep settings)"
+fi
 
 # internal/config refuses to start on these; same rules, all reported at once.
 bad="" port_ok=1 url_ok=1
@@ -258,7 +241,9 @@ elif printf '%s' "$resp" | grep -Eq '"result"[[:space:]]*:[[:space:]]*6[^0-9]'; 
   api_ok=1
   ok ankiconn "$anki_url answers API version 6${anki_key:+ (with ANKI_CONNECT_KEY)}"
 elif printf '%s' "$resp" | grep -qi 'api key'; then
-  fail ankiconn "$anki_url wants another key: ANKI_CONNECT_KEY must equal the add-on's apiKey (unset if it has none)"
+  blanks=""
+  [ "$(trim "$anki_key")" = "$anki_key" ] || blanks=" (it ends or starts with blanks, which the server keeps)"
+  fail ankiconn "$anki_url wants another key: ANKI_CONNECT_KEY must equal the add-on's apiKey (unset if it has none)$blanks"
 elif printf '%s' "$resp" | grep -q '"result"'; then
   fail ankiconn "$anki_url answered: $(printf '%s' "$resp" | head -c 200)"
 else
