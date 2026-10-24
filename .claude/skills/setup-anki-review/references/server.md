@@ -45,7 +45,10 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
    `KNOWLEDGE_DECKS` from `.env` gives them. First deploy, or a `missing` line: ask as in SKILL.md
    step 3 and set `KNOWLEDGE_DECKS` in `.env`. Note whether it changed in this run.
 7. Claude token. Skip when `S status` shows `token: present`, unless the last `install.sh` failed
-   its smoke test with an auth error (401, invalid token): then rotate.
+   its smoke test with an auth error (401, invalid token): then rotate. Also skip when it shows
+   `not installed yet` next to `service: active` (a deploy from an older kit, no `install-state`):
+   the token is likely in the env file already, `install.sh` keeps it and, if there is none, stops
+   with the upload command; only then come back here.
    - `S window claude-token claude setup-token` opens it in a new window. Tell the user: authorize
      in the browser, copy the `sk-ant-...` token the window prints, say done. Never read that
      window.
