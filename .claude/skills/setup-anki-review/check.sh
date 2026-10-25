@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Read-only status of everything anki-review needs, from the same settings `make run` sees (.env
-# over the environment). It sends AnkiConnect only `version` and `deckNames`, never calls the Claude API
-# (no quota), never contacts a running anki-review, never starts or stops a process. From the
-# saved pass in DATA_DIR it prints only the stage.
+# over the environment). It sends AnkiConnect only `version` and `deckNames`, without an apiKey: the
+# key is entered on the setup page, not read here. It never calls the Claude API (no quota), never
+# contacts a running anki-review, never starts or stops a process. From the saved pass in DATA_DIR it
+# prints only the stage.
 #
 #   check.sh         one line per prerequisite; exit 1 when a required one fails
 #   check.sh decks   top-level Anki decks and the kind the server would grade each as
@@ -21,7 +22,6 @@ env_or() {
 
 port=$(env_or PORT 8767)
 anki_url=$(env_or ANKI_CONNECT_URL http://127.0.0.1:8765)
-anki_key=${ANKI_CONNECT_KEY:-}
 claude_bin=$(env_or CLAUDE_BIN claude)
 data_dir=$(env_or DATA_DIR data)
 knowledge=$(env_or KNOWLEDGE_DECKS Tech,Career)
@@ -43,22 +43,16 @@ version_ge() {
   return 0
 }
 
-# The body goes through stdin, so the apiKey never shows up in `ps`.
 anki_call() {
-  local key=""
-  if [ -n "$anki_key" ]; then
-    key=${anki_key//\\/\\\\}
-    key=${key//\"/\\\"}
-    key=",\"key\":\"$key\""
-  fi
-  printf '{"action":"%s","version":6%s}' "$1" "$key" |
+  printf '{"action":"%s","version":6}' "$1" |
     curl -sS -m 5 -H 'Content-Type: application/json' --data-binary @- "$anki_url" 2>&1
 }
 
-# Lines "<kind>\t<deck>": knowledge, language, or missing (named in KNOWLEDGE_DECKS, no such deck).
-# Same rules as the server: exact top-level name, case-sensitive, the bare Default deck left out.
+# Reads an AnkiConnect answer on stdin: lines "<kind>\t<deck>": knowledge, language, or missing (named
+# in KNOWLEDGE_DECKS, no such deck). Same rules as the server: exact top-level name, case-sensitive,
+# the bare Default deck left out.
 deck_kinds() {
-  anki_call deckNames | KD=$knowledge python3 -I -c '
+  KD=$knowledge python3 -I -c '
 import json, os, sys
 try:
     r = json.load(sys.stdin)
@@ -113,11 +107,14 @@ fi
 case ${1:-} in
 "") ;;
 decks)
-  if have_python; then
-    deck_kinds
+  resp=$(anki_call deckNames)
+  if printf '%s' "$resp" | grep -qi 'api key'; then
+    info decks "$anki_url wants its apiKey: the deck list needs it, so name the knowledge decks by hand (KNOWLEDGE_DECKS=$knowledge)"
+  elif have_python; then
+    printf '%s\n' "$resp" | deck_kinds
   else
     echo "python3 not found, raw AnkiConnect answer:" >&2
-    anki_call deckNames
+    printf '%s\n' "$resp"
     echo
   fi
   exit
@@ -138,6 +135,10 @@ if [ -f "$root/.env" ]; then
   info env ".env: $dotenv_count setting(s), they win over the environment as in make run"
 else
   info env "no .env: environment and defaults (cp .env.example .env to keep settings)"
+fi
+# The server ignores ANKI_CONNECT_KEY now: say so, but never print its value.
+if [ -n "$(trim "${ANKI_CONNECT_KEY:-}")" ]; then
+  warn env "ANKI_CONNECT_KEY is set but ignored now: remove it, the key goes into the setup page"
 fi
 
 # internal/config refuses to start on these; same rules, all reported at once.
@@ -233,17 +234,18 @@ else
   ok anki "${anki_ver:+$anki_ver at }$anki_where ($anki_run)"
 fi
 
-api_ok=0 resp=""
+api_ok=0 wants_key=0 resp=""
 [ "$url_ok" = 0 ] || resp=$(anki_call version)
 if [ "$url_ok" = 0 ]; then
   info ankiconn "skipped: ANKI_CONNECT_URL is not valid"
 elif printf '%s' "$resp" | grep -Eq '"result"[[:space:]]*:[[:space:]]*6[^0-9]'; then
   api_ok=1
-  ok ankiconn "$anki_url answers API version 6${anki_key:+ (with ANKI_CONNECT_KEY)}"
+  ok ankiconn "$anki_url answers API version 6"
 elif printf '%s' "$resp" | grep -qi 'api key'; then
-  blanks=""
-  [ "$(trim "$anki_key")" = "$anki_key" ] || blanks=" (it ends or starts with blanks, which the server keeps)"
-  fail ankiconn "$anki_url wants another key: ANKI_CONNECT_KEY must equal the add-on's apiKey (unset if it has none)$blanks"
+  # Reachable, so the server can run once the key is entered on the setup page.
+  api_ok=1
+  wants_key=1
+  ok ankiconn "$anki_url wants its apiKey: enter it on the setup page"
 elif printf '%s' "$resp" | grep -q '"result"'; then
   fail ankiconn "$anki_url answered: $(printf '%s' "$resp" | head -c 200)"
 else
@@ -266,9 +268,11 @@ else
 fi
 
 if [ "$api_ok" = 1 ]; then
-  if ! have_python; then
+  if [ "$wants_key" = 1 ]; then
+    info decks "skipped: AnkiConnect wants its apiKey, so the deck list is not read"
+  elif ! have_python; then
     info decks "python3 not found: deck check skipped"
-  elif kinds=$(deck_kinds 2>&1); then
+  elif kinds=$(anki_call deckNames | deck_kinds 2>&1); then
     known=$(printf '%s\n' "$kinds" | awk -F'\t' '$1 == "knowledge" { printf "%s%s", s, $2; s = ", " }')
     lang=$(printf '%s\n' "$kinds" | grep -c '^language' || true)
     missing=$(printf '%s\n' "$kinds" | awk -F'\t' '$1 == "missing" { printf "%s%s", s, $2; s = ", " }')
@@ -339,15 +343,21 @@ else
   info build "bin/anki-review not built yet"
 fi
 
+if [ -f "$data_dir/vault.json" ]; then
+  info owner "owner set up ($data_dir/vault.json)"
+else
+  info owner "no owner yet: the page opens with the setup form"
+fi
+
 if [ -f "$data_dir/state.json" ]; then
   stage=unknown
   if have_python; then stage=$(pass_stage "$data_dir/state.json"); fi
   case $stage in
-  confirmed) warn data "$data_dir holds a pass with confirmed grades: the server writes them to Anki as soon as it starts" ;;
-  checking) warn data "$data_dir holds a pass waiting for grading: the server runs claude -p on it as soon as it starts" ;;
+  confirmed) warn data "$data_dir holds a pass with confirmed grades: the server writes them to Anki on the first unlock (setup or login on the page)" ;;
+  checking) warn data "$data_dir holds a pass waiting for grading: the server runs claude -p on it on the first unlock (setup or login on the page)" ;;
   idle) info data "$data_dir exists, no saved pass" ;;
   unreadable) warn data "$data_dir/state.json is not a version 1 state file: the server refuses to start with it" ;;
-  unknown) warn data "$data_dir holds a saved pass, stage unknown without python3: confirmed grades in it go to Anki as soon as the server starts" ;;
+  unknown) warn data "$data_dir holds a saved pass, stage unknown without python3: confirmed grades in it go to Anki on the first unlock (setup or login on the page)" ;;
   *) info data "$data_dir holds a saved pass (stage $stage): nothing runs on it until the page acts" ;;
   esac
 elif [ -d "$data_dir" ]; then

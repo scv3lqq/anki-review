@@ -16,8 +16,7 @@ StateDirectoryMode=0700
 UMask=0077
 # Takes the binary staged in the deploy dir, so an update is a file swap plus a restart.
 ExecStartPre=-+/usr/bin/install -C -o root -g root -m 0755 @DEPLOY_DIR@/bin/anki-review /usr/local/bin/anki-review
-# $$ keeps systemd from expanding the token into the argv of sh.
-ExecStartPre=/bin/sh -c 'test -n "$${CLAUDE_CODE_OAUTH_TOKEN}" || { echo "CLAUDE_CODE_OAUTH_TOKEN is empty in /etc/anki-review/env" >&2; exit 1; }'
+# The tokens live sealed in the state dir and arrive through the setup page, never through this file.
 ExecStart=/usr/local/bin/anki-review
 Restart=on-failure
 RestartSec=5s

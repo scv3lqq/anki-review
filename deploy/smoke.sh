@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Runs `claude -p` once as anki-review with the service's env file and sandbox, which proves the
-# token and the hardening work together. The token stays in the env file, never in argv.
-# install.sh runs it before it enables the service. Usage: sudo /abs/path/smoke.sh
+# Runs `claude --version` once as anki-review with the service's env file and sandbox, which proves
+# the binary starts under the hardening. No token is needed for that: the tokens arrive later through
+# the setup page, so the env file holds none yet. install.sh runs it before it enables the service.
+# Usage: sudo /abs/path/smoke.sh
 set -euo pipefail
 
 fail() { echo "smoke.sh: $*" >&2; exit 1; }
@@ -20,5 +21,4 @@ while IFS= read -r line; do
 done < <(sed -n '/^\[Service\]/,/^\[/p' "$unit")
 
 systemd-run --quiet --pipe --wait --collect --service-type=exec "${props[@]}" \
-  /var/lib/anki-review/.local/bin/claude -p --safe-mode --tools "" --no-session-persistence \
-  "Reply with the single word OK" </dev/null
+  /var/lib/anki-review/.local/bin/claude --version </dev/null

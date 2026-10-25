@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Server steps of deploy/README.md for the setup skill, from DEPLOY_SSH, DEPLOY_SSH_PORT, DEPLOY_DIR
-# and DEPLOY_URL in .env (or the environment). Secrets (VNC password, Claude token, AnkiConnect key)
-# travel only through pipes and files: never argv, never this script's output.
+# Server steps of deploy/README.md for the setup skill, from DEPLOY_SSH, DEPLOY_SSH_PORT, DEPLOY_DIR,
+# DEPLOY_PORT (the service port, default 8767) and DEPLOY_URL in .env (or the environment). Secrets
+# (VNC password, AnkiConnect key) travel only through pipes and files: never argv, never this script's
+# output. The Claude token and the owner's password never reach this script: the owner types them
+# into the setup page.
 #
 #   server.sh precheck [update]  read-only host checks (exit 1 on FAIL)
 #   server.sh upload             the kit and bin/anki-review-linux-amd64 into DEPLOY_DIR (0700)
@@ -13,15 +15,17 @@
 #   server.sh wait-decks N       until the deck count exceeds N (30 min at most)
 #   server.sh tunnel             VNC tunnel 127.0.0.1:5901 to the host's 5900, until killed
 #   server.sh vnc-password       the VNC password into the clipboard
+#   server.sh anki-key           the AnkiConnect key into the clipboard, for the setup page
+#   server.sh app-tunnel         tunnel 127.0.0.1:8768 to the service port, until killed (setup page)
+#   server.sh wait-setup         until the owner is set up and logged in on the page (30 min at most)
 #   server.sh clip-clear         empties the clipboard
 #   server.sh window NAME CMD    CMD in a new tmux window or Terminal window; prints its exit file
-#   server.sh token              the Claude token from the clipboard to the host, then clears it
 #   server.sh install            sudo install.sh in a new window; prints the exit file
 #   server.sh wait-install FILE  until that window ends or the service restarts (30 min at most)
-#   server.sh status             service, API stage, due decks, binary match, token, polkit
+#   server.sh status             service, owner (setup, locked, unlocked), API stage, decks, binary, polkit
 #   server.sh restart            systemctl restart without sudo (the polkit rule from install.sh)
 #   server.sh sudo-restart       the same with sudo, in a new window; prints the exit file
-#   server.sh verify-url         DEPLOY_URL/api/cards and /api/decks
+#   server.sh verify-url         DEPLOY_URL/api/session
 set -euo pipefail
 
 here=$(dirname -- "$0")
@@ -46,6 +50,12 @@ need_host() {
   [ -n "$host" ] || die "DEPLOY_SSH is not set: put user@host into .env"
   case $host in -* | *[[:space:]\'\"\\]*) die "DEPLOY_SSH looks wrong: $host" ;; esac
   case $port in '' | *[!0-9]*) die "DEPLOY_SSH_PORT must be a number: $port" ;; esac
+}
+# The service's PORT on the host: the kit default unless DEPLOY_PORT says otherwise.
+app_port=$(trim "${DEPLOY_PORT:-}")
+app_port=${app_port:-8767}
+need_app_port() {
+  case $app_port in '' | *[!0-9]*) die "DEPLOY_PORT must be a number: $app_port" ;; esac
 }
 
 # BatchMode: a key or agent is needed, ssh never stops at a password prompt nobody sees.
@@ -354,17 +364,56 @@ cmd_window() {
   echo "$st/exit"
 }
 
-cmd_token() {
-  local t size
+cmd_anki_key() {
+  local k
   resolve_dir
-  t=$(trim "$(clip_paste)")
-  case $t in sk-ant-?*) ;; *) die "the clipboard holds no Claude token (sk-ant-...): copy the one claude setup-token printed" ;; esac
-  case $t in *[[:space:]]*) die "the clipboard holds more than one token" ;; esac
-  printf '%s\n' "$t" | rsh "umask 077; cat > $(q "$dir/claude-token")"
-  unset t
-  size=$(rsh "wc -c < $(q "$dir/claude-token")")
-  printf '' | clip_copy
-  echo "token uploaded: $(trim "$size") bytes in $dir/claude-token, clipboard cleared"
+  k=$(rsh "cat $(q "$dir/anki/secrets/ankiconnect-key")") || die "can't read the AnkiConnect key: did up.sh run?"
+  k=$(trim "$k")
+  [ -n "$k" ] || die "the AnkiConnect key file is empty"
+  printf '%s' "$k" | clip_copy
+  unset k
+  echo "AnkiConnect key copied to the clipboard"
+}
+
+# The setup page of the host's service, reached from this machine at http://127.0.0.1:8768/.
+cmd_app_tunnel() {
+  need_host
+  need_app_port
+  if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:8768 -sTCP:LISTEN >/dev/null 2>&1; then
+    die "local port 8768 is in use"
+  fi
+  # Its own connection, as in cmd_tunnel: a shared ControlMaster would keep the forward alive.
+  exec ssh -p "$port" -o BatchMode=yes -o ControlMaster=no -o ControlPath=none \
+    -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -N -L "127.0.0.1:8768:127.0.0.1:$app_port" "$host"
+}
+
+# Asks the host itself, so no tunnel is needed; the answer holds no secret.
+cmd_wait_setup() {
+  local i out answered=0
+  need_app_port
+  for i in $(seq 1 360); do
+    # ssh failing is not a state of the owner: remember whether the host ever answered.
+    out=$(rsh "curl -fsS -m 5 http://127.0.0.1:$app_port/api/session" 2>/dev/null) || out=""
+    [ -z "$out" ] || answered=1
+    if [ -n "$out" ] && printf '%s' "$out" | python3 -I -c '
+import json, sys
+try:
+    s = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if isinstance(s, dict) and s.get("state") != "setup" and s.get("unlocked") is True else 1)
+'; then
+      echo "owner: unlocked"
+      return 0
+    fi
+    [ "$i" = 360 ] || sleep 5
+  done
+  if [ "$answered" = 0 ]; then
+    echo "owner: no answer from the host over ssh in 30 minutes"
+  else
+    echo "owner: still not unlocked after 30 minutes"
+  fi
+  return 1
 }
 
 invocation() { rsh "systemctl show -p InvocationID --value $svc 2>/dev/null" || true; }
@@ -406,33 +455,59 @@ status_script() {
   cat <<'EOF'
 echo "service=$(systemctl is-active anki-review 2>/dev/null)"
 echo "bin=$(sha256sum /usr/local/bin/anki-review 2>/dev/null | cut -c1-64)"
-echo "cards=$(curl -sS -m 5 http://127.0.0.1:8767/api/cards 2>/dev/null | head -c 100000 | tr -d '\n')"
-echo "decks=$(curl -sS -m 30 http://127.0.0.1:8767/api/decks 2>/dev/null | head -c 100000 | tr -d '\n')"
-# install.sh leaves this file, no secrets in it
-[ ! -f "$1/install-state" ] || sed -n 's/^\(token\|polkit\)=/state_&/p' "$1/install-state"
+s=$(curl -sS -m 5 "http://127.0.0.1:$2/api/session" 2>/dev/null | head -c 100000 | tr -d '\n')
+echo "session=$s"
+# A binary from before the login has no /api/session (404 text): its /api/cards is the old open answer.
+case $s in '{'*) ;; *) echo "cards=$(curl -sS -m 5 "http://127.0.0.1:$2/api/cards" 2>/dev/null | head -c 100000 | tr -d '\n')" ;; esac
+# install.sh leaves this file, no secrets in it; only the polkit line is read (older files carry token=)
+[ ! -f "$1/install-state" ] || sed -n 's/^polkit=/state_&/p' "$1/install-state"
 EOF
 }
 
 cmd_status() {
-  local out want=""
+  local out anki_decks want=""
+  need_app_port
   resolve_dir
-  out=$(status_script | rsh "sh -s -- $(q "$dir")") || die "ssh -p $port $host failed"
+  out=$(status_script | rsh "sh -s -- $(q "$dir") $(q "$app_port")") || die "ssh -p $port $host failed"
+  # Same count as `server.sh decks`; an empty value makes the python below say there is no answer.
+  anki_decks=$(deck_names_json 2>/dev/null | count_decks 2>/dev/null || true)
   [ ! -f "$bin_local" ] || want=$(sha "$bin_local" | cut -d' ' -f1)
-  printf '%s\n' "$out" | WANT=$want python3 -I -c '
+  printf '%s\nanki_decks=%s\n' "$out" "$anki_decks" | APP=$app_port WANT=$want python3 -I -c '
 import json, os, sys
 v = dict(l.split("=", 1) for l in sys.stdin.read().splitlines() if "=" in l)
+app = os.environ["APP"]
 print("service:", v.get("service") or "unknown")
-try:
-    print("api stage:", json.loads(v.get("cards", "")).get("stage"))
-except ValueError:
-    print("api stage: no answer on 127.0.0.1:8767")
-try:
-    decks = json.loads(v.get("decks", ""))["decks"]
-    print("decks with cards due:", len(decks))
-    print("knowledge decks among them:", ", ".join(d["name"] for d in decks if d.get("kind") == "knowledge" and "::" not in d["name"]) or "none")
-except (ValueError, KeyError, TypeError):
-    print("decks with cards due: no answer (AnkiConnect down or the key is wrong?)")
-print("token:", v.get("state_token", "not installed yet (no install-state)"))
+def jdict(text):
+    try:
+        x = json.loads(text)
+    except ValueError:
+        return None
+    return x if isinstance(x, dict) else None
+s = jdict(v.get("session", ""))
+if s is not None:
+    if s.get("state") == "setup":
+        print("owner: setup needed (no owner yet)")
+    elif s.get("unlocked"):
+        print("owner: unlocked")
+    else:
+        print("owner: locked (log in on the page)")
+    if s.get("state") == "setup":
+        print("api stage: none (no owner yet)")
+    elif "stage" in s:
+        print("api stage:", s["stage"])
+    elif s.get("unlocked") is False:
+        print("api stage: unknown (locked)")
+    else:
+        print("api stage: unknown")
+else:
+    c = jdict(v.get("cards", ""))
+    if c is not None and "stage" in c:
+        print("owner: n/a (older binary without a login)")
+        print("api stage:", c["stage"])
+    else:
+        print("owner: no answer on 127.0.0.1:" + app)
+        print("api stage: no answer on 127.0.0.1:" + app)
+print("decks:", v.get("anki_decks") or "no answer from AnkiConnect (down, or the key is wrong?)")
 print("polkit rule:", v.get("state_polkit", "unknown (no install-state)"))
 want, got = os.environ.get("WANT"), v.get("bin", "")
 if not got:
@@ -464,33 +539,43 @@ cmd_sudo_restart() {
 }
 
 cmd_verify_url() {
-  local url p body code
+  local url body code
   url=$(trim "${DEPLOY_URL:-}")
   [ -n "$url" ] || die "DEPLOY_URL is not set"
   url=${url%/}
-  for p in /api/cards /api/decks; do
-    body=$(curl -sS -m 30 -w '\n%{http_code}' "$url$p" 2>&1) || true
-    code=${body##*$'\n'}
-    body=${body%$'\n'*}
-    if [ "$code" = 200 ]; then
-      printf '%s' "$body" | WHAT="$url$p" python3 -I -c '
+  body=$(curl -sS -m 30 -w '\n%{http_code}' "$url/api/session" 2>&1) || true
+  code=${body##*$'\n'}
+  body=${body%$'\n'*}
+  case $code in
+  200)
+    printf '%s' "$body" | WHAT="$url/api/session" python3 -I -c '
 import json, os, sys
 what = os.environ["WHAT"]
 try:
-    r = json.load(sys.stdin)
-    print(what + ": 200,", "stage %s" % r["stage"] if "stage" in r else "%d deck(s) due" % len(r["decks"]))
+    s = json.load(sys.stdin)
+    print(what + ": 200, state %s, %s" % (s["state"], "unlocked" if s.get("unlocked") else "locked"))
 except (ValueError, KeyError, TypeError):
-    print(what + ": 200 but not the API (a login page?)")
+    print(what + ": 200 but not the API (a login page of the proxy?): not a failure")
 '
-    else
-      echo "$url$p: HTTP ${code:-none}, $(printf '%s' "$body" | head -c 200)"
+    ;;
+  401 | 403)
+    # The app's own Host guard answers 403 {"error":"host"} when the proxy forwards another Host.
+    if [ "$code" = 403 ] && printf '%s' "$body" | grep -Eq '"error"[[:space:]]*:[[:space:]]*"host"'; then
+      echo "$url/api/session: FAIL, HTTP 403 from the app's Host guard: the proxy must send Host: 127.0.0.1:<port>"
+      return 1
     fi
-  done
+    # Anything else in front of the service is the proxy's access control, not the app: don't fail on it.
+    echo "$url/api/session: HTTP $code from the proxy's access control, not a failure"
+    ;;
+  *)
+    echo "$url/api/session: HTTP ${code:-none}, $(printf '%s' "$body" | head -c 200)"
+    ;;
+  esac
 }
 
 case ${1:-} in
-precheck | upload | upload-bin | kit-diff | up | decks | deck-names | wait-decks | tunnel | vnc-password | token | \
-  install | wait-install | status | restart | sudo-restart) need_host ;;
+precheck | upload | upload-bin | kit-diff | up | decks | deck-names | wait-decks | tunnel | vnc-password | anki-key | \
+  app-tunnel | wait-setup | install | wait-install | status | restart | sudo-restart) need_host ;;
 esac
 case ${1:-} in
 precheck) cmd_precheck "${2:-new}" ;;
@@ -503,12 +588,14 @@ deck-names) cmd_deck_names ;;
 wait-decks) cmd_wait_decks "${2:-1}" ;;
 tunnel) cmd_tunnel ;;
 vnc-password) cmd_vnc_password ;;
+anki-key) cmd_anki_key ;;
+app-tunnel) cmd_app_tunnel ;;
+wait-setup) cmd_wait_setup ;;
 clip-clear) cmd_clip_clear ;;
 window)
   shift
   cmd_window "$@"
   ;;
-token) cmd_token ;;
 install) cmd_install ;;
 wait-install) cmd_wait_install "${2:-}" ;;
 status) cmd_status ;;
