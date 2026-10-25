@@ -22,7 +22,7 @@
 #   server.sh clip-clear         empties the clipboard
 #   server.sh window NAME CMD    CMD in a new tmux window or Terminal window; prints its exit file
 #   server.sh install            sudo install.sh in a new window; prints the exit file
-#   server.sh wait-install FILE  until that window ends or the service restarts (30 min at most)
+#   server.sh wait-install FILE  until that window ends (install, sudo-restart: or the service restarts; 30 min)
 #   server.sh status             service, owner (setup, locked, unlocked), API stage, decks, sync, binary, polkit
 #   server.sh restart            systemctl restart without sudo (the polkit rule from install.sh)
 #   server.sh sudo-restart       the same with sudo, in a new window; prints the exit file
@@ -449,14 +449,18 @@ cmd_install() {
 }
 
 cmd_wait_install() {
-  local exitf=${1:?exit file} inv0="" inv i
-  [ ! -f "${exitf%/exit}/invocation" ] || inv0=$(cat "${exitf%/exit}/invocation")
+  local exitf=${1:?exit file} inv0="" inv i watch=0
+  # Only install and sudo-restart leave an invocation file: any other window just ends.
+  if [ -f "${exitf%/exit}/invocation" ]; then
+    inv0=$(cat "${exitf%/exit}/invocation")
+    watch=1
+  fi
   for i in $(seq 1 360); do
     if [ -f "$exitf" ]; then
       echo "window ended, exit code $(cat "$exitf")"
       return 0
     fi
-    if [ $((i % 6)) = 0 ]; then
+    if [ "$watch" = 1 ] && [ $((i % 6)) = 0 ]; then
       inv=$(invocation)
       if [ -n "$inv" ] && [ "$inv" != "$inv0" ] && [ "$(rsh "systemctl is-active $svc" 2>/dev/null || true)" = active ]; then
         echo "service restarted (the window is still open)"
