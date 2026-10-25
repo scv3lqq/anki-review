@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -20,6 +21,11 @@ const (
 	maxField  = 2000
 	tailBytes = 300
 	waitDelay = 10 * time.Second
+	// a check is one tiny call; it fails in seconds unless the network hangs
+	checkTimeout = 90 * time.Second
+	checkPrompt  = "Reply with the single word OK"
+	oauthVar     = "CLAUDE_CODE_OAUTH_TOKEN"
+	apiKeyPrefix = "sk-ant-api" //nolint:gosec // G101: a token prefix, not a credential
 )
 
 var errIncomplete = errors.New("incomplete grades from claude")
@@ -31,6 +37,9 @@ type Grader struct {
 	Timeout time.Duration
 	// Dir is the working directory of claude: an empty data dir, so no project files are around.
 	Dir string
+	// Token returns the owner's Claude token, read on every call. Nil or "" means claude uses the
+	// login of the account the server runs as.
+	Token func() string
 }
 
 type cliResult struct {
@@ -84,12 +93,78 @@ func (g *Grader) args() []string {
 }
 
 func (g *Grader) run(parent context.Context, prompt string) (*gradesOutput, error) {
-	ctx, cancel := context.WithTimeout(parent, g.Timeout)
+	token := g.token()
+	p, err := g.exec(parent, g.Timeout, g.args(), prompt, token)
+	if err != nil {
+		return nil, err
+	}
+	var res cliResult
+	if err := json.Unmarshal(p.stdout, &res); err != nil {
+		if p.exit != nil {
+			return nil, fmt.Errorf("claude: %w: %s", p.exit, tail(p.text))
+		}
+		return nil, fmt.Errorf("claude: decode output: %w", err)
+	}
+	if res.IsError || len(res.StructuredOutput) == 0 {
+		return nil, fmt.Errorf("claude: %s: %s", res.Subtype, tail(redact(res.Result, token)))
+	}
+	var out gradesOutput
+	if err := json.Unmarshal(res.StructuredOutput, &out); err != nil {
+		return nil, fmt.Errorf("%w: %w", errIncomplete, err)
+	}
+	return &out, nil
+}
+
+// Check asks claude once with token, as a settings change does before it saves the token. An empty
+// token checks the login of the account the server runs as. The error text is shown to the owner
+// as it is: claude's own message, without the token.
+func (g *Grader) Check(ctx context.Context, token string) error {
+	args := []string{"-p", "--safe-mode", "--tools", "", "--no-session-persistence", "--output-format", "json"}
+	if g.Model != "" {
+		args = append(args, "--model", g.Model)
+	}
+	p, err := g.exec(ctx, checkTimeout, args, checkPrompt, token)
+	if err != nil {
+		return err
+	}
+	var res cliResult
+	if err := json.Unmarshal(p.stdout, &res); err != nil {
+		if p.exit != nil {
+			return fmt.Errorf("%w: %s", p.exit, tail(p.text))
+		}
+		return errors.New("no readable answer")
+	}
+	if res.IsError {
+		return errors.New(checkMessage(res.Result, token))
+	}
+	if p.exit != nil {
+		return fmt.Errorf("%w: %s", p.exit, tail(p.text))
+	}
+	if strings.TrimRight(strings.TrimSpace(res.Result), ".!") != "OK" {
+		return errors.New("unexpected answer: " + checkMessage(res.Result, token))
+	}
+	return nil
+}
+
+// proc is one finished claude process.
+type proc struct {
+	stdout []byte
+	// text is stderr then stdout, for messages
+	text string
+	// exit is claude's exit error, nil on exit 0
+	exit error
+}
+
+// exec runs claude once. The prompt goes through stdin and the token only into the child's env: neither
+// is in argv, which any local user can read in `ps`. A timeout or a canceled parent is an error; a
+// non-zero exit is reported in proc.exit, because claude may still print an answer before it fails.
+func (g *Grader) exec(parent context.Context, timeout time.Duration, args []string, prompt, token string) (proc, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, g.Bin, g.args()...) //nolint:gosec // G204: the binary comes from the owner's config
+	cmd := exec.CommandContext(ctx, g.Bin, args...) //nolint:gosec // G204: the binary comes from the owner's config
 	cmd.Dir = g.Dir
-	// the prompt holds the answer keys: stdin, never argv, which any local user can read in `ps`
+	cmd.Env = childEnv(os.Environ(), token)
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -99,26 +174,55 @@ func (g *Grader) run(parent context.Context, prompt string) (*gradesOutput, erro
 	runErr := cmd.Run()
 	switch {
 	case parent.Err() != nil:
-		return nil, fmt.Errorf("claude: %w", parent.Err())
+		return proc{}, fmt.Errorf("claude: %w", parent.Err())
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return nil, fmt.Errorf("claude: no answer in %s", g.Timeout)
+		return proc{}, fmt.Errorf("claude: no answer in %s", timeout)
 	}
+	return proc{stdout: stdout.Bytes(), text: redact(stderr.String()+stdout.String(), token), exit: runErr}, nil
+}
 
-	var res cliResult
-	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
-		if runErr != nil {
-			return nil, fmt.Errorf("claude: %w: %s", runErr, tail(stderr.String()+stdout.String()))
+func (g *Grader) token() string {
+	if g.Token == nil {
+		return ""
+	}
+	return g.Token()
+}
+
+// childEnv is the server's environment without the subscription token variable, plus the owner's
+// token under the variable claude reads it from: an API key or a subscription (OAuth) token.
+func childEnv(environ []string, token string) []string {
+	env := make([]string, 0, len(environ)+1)
+	for _, kv := range environ {
+		if !strings.HasPrefix(kv, oauthVar+"=") {
+			env = append(env, kv)
 		}
-		return nil, fmt.Errorf("claude: decode output: %w", err)
 	}
-	if res.IsError || len(res.StructuredOutput) == 0 {
-		return nil, fmt.Errorf("claude: %s: %s", res.Subtype, tail(res.Result))
+	switch {
+	case token == "":
+	case strings.HasPrefix(token, apiKeyPrefix):
+		env = append(env, "ANTHROPIC_API_KEY="+token)
+	default:
+		env = append(env, oauthVar+"="+token)
 	}
-	var out gradesOutput
-	if err := json.Unmarshal(res.StructuredOutput, &out); err != nil {
-		return nil, fmt.Errorf("%w: %w", errIncomplete, err)
+	return env
+}
+
+// checkMessage is claude's own text for a failed check, without the token; the subtype stays out of
+// it because the page shows the message as it is.
+func checkMessage(result, token string) string {
+	msg := tail(redact(result, token))
+	if msg == "" {
+		return "no message from claude"
 	}
-	return &out, nil
+	return msg
+}
+
+// redact keeps the token out of messages, which reach the page and the log.
+func redact(s, token string) string {
+	if token == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, token, "[token]")
 }
 
 func tail(s string) string {

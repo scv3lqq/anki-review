@@ -17,7 +17,6 @@ type Config struct {
 	DataDir        string
 	KnowledgeDecks []string
 	AnkiURL        string
-	AnkiKey        string
 	AnkiSync       bool
 	ClaudeBin      string
 	ClaudeModel    string
@@ -25,7 +24,7 @@ type Config struct {
 	LogLevel       zerolog.Level
 }
 
-// Addr is loopback only: the page has no login of its own.
+// Addr is loopback only: a reverse proxy or an ssh tunnel reaches the page, never the network.
 func (c Config) Addr() string {
 	return fmt.Sprintf("127.0.0.1:%d", c.Port)
 }
@@ -41,7 +40,6 @@ func Load(getenv func(string) string) (Config, error) {
 	c := Config{
 		DataDir:     get("DATA_DIR", "data"),
 		AnkiURL:     get("ANKI_CONNECT_URL", "http://127.0.0.1:8765"),
-		AnkiKey:     getenv("ANKI_CONNECT_KEY"),
 		ClaudeBin:   get("CLAUDE_BIN", "claude"),
 		ClaudeModel: get("CLAUDE_MODEL", ""),
 	}

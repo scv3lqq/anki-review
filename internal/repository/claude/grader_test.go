@@ -181,3 +181,131 @@ func TestSchemaGradesMatchDomain(t *testing.T) {
 		t.Errorf("schema grades = %v, want %v", got, domain.Grades)
 	}
 }
+
+func TestChildEnv(t *testing.T) {
+	environ := []string{"PATH=/bin", "CLAUDE_CODE_OAUTH_TOKEN=old", "HOME=/home/x"}
+	tests := []struct {
+		name  string
+		token string
+		want  []string
+	}{
+		{name: "no token", token: "", want: []string{"PATH=/bin", "HOME=/home/x"}},
+		{name: "subscription token", token: "sk-ant-oat01-new", want: []string{"PATH=/bin", "HOME=/home/x", "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-new"}},
+		{name: "API key", token: "sk-ant-api03-new", want: []string{"PATH=/bin", "HOME=/home/x", "ANTHROPIC_API_KEY=sk-ant-api03-new"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := childEnv(environ, tt.token); !slices.Equal(got, tt.want) {
+				t.Errorf("childEnv() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRedact(t *testing.T) {
+	tests := []struct{ in, token, want string }{
+		{"Invalid API key sk-ant-api03-x", "sk-ant-api03-x", "Invalid API key [token]"},
+		{"no token here", "", "no token here"},
+		{"nothing to hide", "sk-ant-oat01-x", "nothing to hide"},
+	}
+	for _, tt := range tests {
+		if got := redact(tt.in, tt.token); got != tt.want {
+			t.Errorf("redact(%q, %q) = %q, want %q", tt.in, tt.token, got, tt.want)
+		}
+	}
+}
+
+func TestCheck(t *testing.T) {
+	const good = "sk-ant-oat01-good"
+	tests := []struct {
+		name    string
+		mode    string
+		token   string
+		require string
+		wantErr string
+	}{
+		{name: "answers OK with the token", mode: fakeclaude.Good, token: good, require: good},
+		{name: "API key goes through ANTHROPIC_API_KEY", mode: fakeclaude.Good, token: "sk-ant-api03-k", require: "sk-ant-api03-k"},
+		{name: "wrong token is refused", mode: fakeclaude.Good, token: "sk-ant-oat01-bad", require: good, wantErr: "Invalid API key"},
+		{name: "no token is refused when one is required", mode: fakeclaude.Good, token: "", require: good, wantErr: "Invalid API key"},
+		{name: "error result", mode: fakeclaude.Error, token: good, wantErr: "usage limit reached"},
+		{name: "crash shows stderr", mode: fakeclaude.Crash, token: good, wantErr: "Invalid API key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bin, calls := fakeclaude.Use(t, tt.mode)
+			if tt.require != "" {
+				fakeclaude.RequireToken(t, tt.require)
+			}
+			g := &Grader{Bin: bin, Timeout: 10 * time.Second, Dir: t.TempDir()}
+			err := g.Check(context.Background(), tt.token)
+			switch {
+			case tt.wantErr != "":
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Check() = %v, want it to contain %q", err, tt.wantErr)
+				}
+			case err != nil:
+				t.Fatalf("Check() = %v", err)
+			}
+			if tt.token != "" && err != nil && strings.Contains(err.Error(), tt.token) {
+				t.Errorf("Check() error carries the token: %v", err)
+			}
+			if got := calls(); got != 0 {
+				t.Errorf("claude grading calls = %d, want 0 for a check", got)
+			}
+		})
+	}
+}
+
+func TestGradeUsesOwnerToken(t *testing.T) {
+	const token = "sk-ant-oat01-owner"
+	items := []domain.Item{{N: 1, Question: "q1", Back: "k1"}}
+	tests := []struct {
+		name    string
+		token   func() string
+		require string
+		wantErr bool
+	}{
+		{name: "token from the owner", token: func() string { return token }, require: token},
+		{name: "no token function uses the local login", token: nil, require: ""},
+		{name: "token the server does not send", token: func() string { return "sk-ant-oat01-other" }, require: token, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bin, _ := fakeclaude.Use(t, fakeclaude.Good)
+			if tt.require != "" {
+				fakeclaude.RequireToken(t, tt.require)
+			}
+			g := &Grader{Bin: bin, Timeout: 10 * time.Second, Dir: t.TempDir(), Token: tt.token}
+			_, err := g.Grade(context.Background(), domain.KindKnowledge, items, map[int]string{1: "a"})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Grade() error = %v, want error %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCheckMessageIsClaudesOwn(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		token   string
+		require string
+		want    string
+	}{
+		{name: "error result", mode: fakeclaude.Error, token: "sk-ant-oat01-x", want: "usage limit reached"},
+		{name: "refused token", mode: fakeclaude.Good, token: "sk-ant-oat01-bad", require: "sk-ant-oat01-good", want: "Invalid API key. Please run /login"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bin, _ := fakeclaude.Use(t, tt.mode)
+			if tt.require != "" {
+				fakeclaude.RequireToken(t, tt.require)
+			}
+			g := &Grader{Bin: bin, Timeout: 10 * time.Second, Dir: t.TempDir()}
+			if err := g.Check(context.Background(), tt.token); err == nil || err.Error() != tt.want {
+				t.Errorf("Check() = %v, want exactly %q", err, tt.want)
+			}
+		})
+	}
+}

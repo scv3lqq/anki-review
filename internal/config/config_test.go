@@ -30,12 +30,12 @@ func TestLoad(t *testing.T) {
 			name: "everything set",
 			env: map[string]string{
 				"PORT": "9000", "DATA_DIR": "/var/lib/anki-review", "KNOWLEDGE_DECKS": " Tech , Go,, ",
-				"ANKI_CONNECT_URL": "http://anki:8765", "ANKI_CONNECT_KEY": "k", "ANKI_SYNC": "false",
+				"ANKI_CONNECT_URL": "http://anki:8765", "ANKI_SYNC": "false",
 				"CLAUDE_BIN": "/usr/local/bin/claude", "CLAUDE_MODEL": "sonnet", "GRADE_TIMEOUT": "90s", "LOG_LEVEL": "debug",
 			},
 			want: func(c *Config) {
 				c.Port, c.DataDir, c.KnowledgeDecks = 9000, "/var/lib/anki-review", []string{"Tech", "Go"}
-				c.AnkiURL, c.AnkiKey, c.AnkiSync = "http://anki:8765", "k", false
+				c.AnkiURL, c.AnkiSync = "http://anki:8765", false
 				c.ClaudeBin, c.ClaudeModel, c.GradeTimeout, c.LogLevel = "/usr/local/bin/claude", "sonnet", 90*time.Second, zerolog.DebugLevel
 			},
 		},

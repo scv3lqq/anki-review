@@ -1,4 +1,4 @@
-// Package app wires the adapters, the review use case and the HTTP handler into a server.
+// Package app wires the adapters, the owner and review use cases and the HTTP handler into a server.
 package app
 
 import (
@@ -7,15 +7,19 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
 
 	"github.com/scv3lqq/anki-review/internal/config"
+	"github.com/scv3lqq/anki-review/internal/domain"
 	"github.com/scv3lqq/anki-review/internal/handler/httpapi"
 	"github.com/scv3lqq/anki-review/internal/repository/ankiconnect"
 	"github.com/scv3lqq/anki-review/internal/repository/claude"
 	"github.com/scv3lqq/anki-review/internal/repository/filestore"
+	"github.com/scv3lqq/anki-review/internal/repository/vault"
+	"github.com/scv3lqq/anki-review/internal/usecase/owner"
 	"github.com/scv3lqq/anki-review/internal/usecase/review"
 	"github.com/scv3lqq/anki-review/web"
 )
@@ -31,39 +35,95 @@ const (
 
 // App is the review server.
 type App struct {
-	cfg config.Config
-	log zerolog.Logger
-	svc *review.Service
-	srv *http.Server
+	cfg     config.Config
+	log     zerolog.Logger
+	store   *filestore.Store
+	grader  *claude.Grader
+	owner   *owner.UseCase
+	srv     *http.Server
+	mu      sync.Mutex
+	service *review.Service // built on the first unlock, nil while locked
 }
 
-// New builds the server; nothing listens until Run or Serve.
+// New builds the server; nothing listens until Run or Serve. The server starts locked: the tokens
+// come from the owner's vault once someone sets up or logs in on the page.
 func New(cfg config.Config, log zerolog.Logger) (*App, error) {
 	store, err := filestore.New(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("app: %w", err)
 	}
-	grader := &claude.Grader{Bin: cfg.ClaudeBin, Model: cfg.ClaudeModel, Timeout: cfg.GradeTimeout, Dir: cfg.DataDir}
-	svc, err := review.New(ankiconnect.New(cfg.AnkiURL, cfg.AnkiKey), grader, store, review.Options{
-		KnowledgeDecks: cfg.KnowledgeDecks,
-		Sync:           cfg.AnkiSync,
-		Log:            log,
-	})
+	vlt, err := vault.New(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("app: %w", err)
 	}
-	h, err := httpapi.New(svc, web.FS, log)
+	a := &App{cfg: cfg, log: log, store: store}
+	a.grader = &claude.Grader{
+		Bin:     cfg.ClaudeBin,
+		Model:   cfg.ClaudeModel,
+		Timeout: cfg.GradeTimeout,
+		Dir:     cfg.DataDir,
+		// read per call: a token changed on the settings page applies to the next grading
+		Token: func() string { return a.owner.Secrets().ClaudeToken },
+	}
+	own, err := owner.New(vlt, checker{ankiURL: cfg.AnkiURL, grader: a.grader}, owner.Options{Log: log, OnUnlock: a.unlock})
 	if err != nil {
 		return nil, fmt.Errorf("app: %w", err)
 	}
-	srv := &http.Server{
+	a.owner = own
+	h, err := httpapi.New(own, a.reviewService, web.FS, log)
+	if err != nil {
+		return nil, fmt.Errorf("app: %w", err)
+	}
+	a.srv = &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
 	}
-	return &App{cfg: cfg, log: log, svc: svc, srv: srv}, nil
+	return a, nil
+}
+
+// unlock builds the review service. Its AnkiConnect key is read from the owner on every call, so a
+// key changed on the settings page applies at once.
+func (a *App) unlock(domain.Secrets) error {
+	svc, err := review.New(ankiconnect.New(a.cfg.AnkiURL, func() string { return a.owner.Secrets().AnkiKey }), a.grader, a.store, review.Options{
+		KnowledgeDecks: a.cfg.KnowledgeDecks,
+		Sync:           a.cfg.AnkiSync,
+		Log:            a.log,
+	})
+	if err != nil {
+		return fmt.Errorf("app: review: %w", err)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.service = svc
+	return nil
+}
+
+// reviewService is the review use case while the server is unlocked, nil before. It returns a nil
+// interface, not a typed nil, so the handler can tell the two apart.
+func (a *App) reviewService() httpapi.Service {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.service == nil {
+		return nil
+	}
+	return a.service
+}
+
+// checker proves a token before the owner seals it, with the same AnkiConnect and claude the server uses.
+type checker struct {
+	ankiURL string
+	grader  *claude.Grader
+}
+
+func (c checker) CheckAnki(ctx context.Context, key string) error {
+	return ankiconnect.New(c.ankiURL, func() string { return key }).Version(ctx)
+}
+
+func (c checker) CheckClaude(ctx context.Context, token string) error {
+	return c.grader.Check(ctx, token)
 }
 
 // Run listens on the configured loopback address until ctx is done.
@@ -91,7 +151,13 @@ func (a *App) Serve(ctx context.Context, ln net.Listener) error {
 	stopCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	shutdownErr := a.srv.Shutdown(stopCtx)
-	closeErr := a.svc.Close(stopCtx)
+	var closeErr error
+	a.mu.Lock()
+	svc := a.service
+	a.mu.Unlock()
+	if svc != nil {
+		closeErr = svc.Close(stopCtx)
+	}
 	if errors.Is(serveErr, http.ErrServerClosed) {
 		serveErr = nil
 	}

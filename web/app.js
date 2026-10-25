@@ -13,6 +13,7 @@ const S = {
   answers: {}, touched: {}, grades: {}, open: null,
   results: null, locked: false, written: false, message: "", polling: null, more: 0, taking: false,
   decks: [], deck: null, starting: false, gradeError: "",
+  authed: false, settings: false,
 };
 
 function el(tag, attrs = {}, ...kids) {
@@ -104,14 +105,26 @@ function cardState(n) {
 
 const filled = () => S.cards.filter((c) => norm(S.answers[c.n])).length;
 
+// a 401 "login" means the session is gone: the login screen takes over and the caller's loop stops
+class LoginRequired extends Error {}
+
+async function call(path, init = {}) {
+  const res = await fetch(path, init);
+  if (res.status === 401 && (await res.clone().json().catch(() => ({}))).code === "login") {
+    showLogin();
+    throw new LoginRequired();
+  }
+  return res;
+}
+
 // "ok", or the conflict code the server sent: "sent" (this stage is already posted), "session"
 // (this tab shows an older pass), "empty" (no cards left), "busy" (a stage is still running)
 async function post(path, body) {
-  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const res = await call(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (res.ok) return "ok";
   const reply = await res.json().catch(() => ({}));
   if (res.status === 409 && ["sent", "session", "empty", "busy"].includes(reply.code)) return reply.code;
-  throw new Error(reply.error ?? `HTTP ${res.status}`);
+  throw Object.assign(new Error(reply.error ?? `HTTP ${res.status}`), { status: res.status, code: reply.code, field: reply.field });
 }
 
 // ---------- screens ----------
@@ -122,19 +135,26 @@ function canLeave() {
 }
 
 function show() {
-  const input = S.screen === "input";
+  // settings cover the screen underneath, so a poll that lands meanwhile can't pull the user away
+  const active = S.settings ? "settings" : S.screen;
+  const input = active === "input";
   $("tabs").hidden = !input;
   for (const b of $("tabs").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.view === S.view));
-  $("back").hidden = !canLeave();
-  $("start").hidden = S.screen !== "start";
-  $("start-bar").hidden = S.screen !== "start";
+  $("back").hidden = S.settings || !canLeave();
+  $("settings-btn").hidden = !S.authed || S.settings;
+  $("logout").hidden = !S.authed;
+  $("start").hidden = active !== "start";
+  $("start-bar").hidden = active !== "start";
   $("card-view").hidden = !(input && S.view === "card");
   $("list-view").hidden = !(input && S.view === "list");
   $("list-bar").hidden = !(input && S.view === "list");
-  $("checking").hidden = S.screen !== "checking";
-  $("results").hidden = S.screen !== "results";
-  $("res-bar").hidden = S.screen !== "results";
-  $("error").hidden = S.screen !== "error";
+  $("checking").hidden = active !== "checking";
+  $("results").hidden = active !== "results";
+  $("res-bar").hidden = active !== "results";
+  $("error").hidden = active !== "error";
+  $("setup").hidden = active !== "setup";
+  $("login").hidden = active !== "login";
+  $("settings").hidden = active !== "settings";
   if (input && S.view === "card") renderCard();
   if (input && S.view === "list") renderList();
 }
@@ -171,7 +191,7 @@ async function showStart() {
   $("start-hint").textContent = "Loading decks…";
   $("start-go").disabled = true;
   try {
-    const res = await fetch("api/decks", { cache: "no-store" });
+    const res = await call("api/decks", { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
     S.decks = data.decks ?? [];
@@ -428,7 +448,7 @@ async function pollResults() {
   let fails = 0;
   while (S.polling === token) {
     try {
-      const res = await fetch("api/results", { cache: "no-store" });
+      const res = await call("api/results", { cache: "no-store" });
       if (res.status === 200) return showResults(await res.json());
       if (res.status === 409) {
         const reply = await res.json().catch(() => ({}));
@@ -603,7 +623,7 @@ async function write() {
     const sent = await post("api/confirm", { session: S.session, grades });
     if (sent === "session") return location.reload();
     // another tab confirmed first: show the grades the server holds, not this tab's
-    if (sent === "sent") return showResults(await (await fetch("api/results", { cache: "no-store" })).json());
+    if (sent === "sent") return showResults(await (await call("api/results", { cache: "no-store" })).json());
     pollStatus();
   } catch {
     S.locked = false;
@@ -616,7 +636,7 @@ async function pollStatus() {
   const token = (S.polling = Symbol("status"));
   while (S.polling === token) {
     try {
-      const res = await fetch("api/status", { cache: "no-store" });
+      const res = await call("api/status", { cache: "no-store" });
       if (res.status === 200) {
         const status = await res.json();
         S.message = status.message ?? "";
@@ -637,6 +657,243 @@ async function pollStatus() {
 
 $("write").addEventListener("click", write);
 
+// ---------- setup, login, settings ----------
+
+const SETUP_FIELDS = { user: "setup-user", password: "setup-password", claude_token: "setup-claude", anki_key: "setup-anki" };
+const SETTINGS_FIELDS = { password: "set-current", new_password: "set-new", claude_token: "set-claude", anki_key: "set-anki" };
+
+// the same help text in both forms: each slot takes its template once
+for (const slot of document.querySelectorAll("[data-help]")) slot.replaceWith($(`tpl-${slot.dataset.help}`).content.cloneNode(true));
+
+for (const button of document.querySelectorAll("[data-reveal]")) {
+  button.addEventListener("click", () => {
+    const input = $(button.dataset.reveal);
+    const reveal = input.type === "password";
+    input.type = reveal ? "text" : "password";
+    button.textContent = reveal ? "Hide" : "Show";
+    button.setAttribute("aria-pressed", String(reveal));
+  });
+}
+
+// the checks mirror the server's rules; the server stays the judge
+const utf8Length = (text) => new TextEncoder().encode(text).length;
+const runeCount = (text) => [...text].length;
+
+function loginError(user) {
+  if (!user) return "Enter a login.";
+  if (runeCount(user) > 64) return "At most 64 characters.";
+  if (/\p{Cc}/u.test(user)) return "No control characters.";
+  return "";
+}
+
+function passwordError(password) {
+  if (runeCount(password) < 12) return "At least 12 characters.";
+  if (runeCount(password) > 1024) return "At most 1024 characters.";
+  return "";
+}
+
+function claudeError(token) {
+  if (!token) return "";
+  if (!token.startsWith("sk-ant-")) return "Must start with sk-ant-.";
+  if (utf8Length(token) > 4096) return "Too long.";
+  if (/\s/.test(token)) return "No spaces inside the token.";
+  return "";
+}
+
+function ankiError(key) {
+  if (!key) return "";
+  if (utf8Length(key) > 1024) return "Too long.";
+  if (/\s/.test(key)) return "No spaces inside the key.";
+  return "";
+}
+
+function say(id, text = "", bad = false) {
+  const node = $(id);
+  node.textContent = text;
+  node.classList.toggle("bad", bad);
+  node.hidden = !text;
+}
+
+function setFieldError(id, message = "") {
+  const node = $(`${id}-error`);
+  node.textContent = message;
+  node.hidden = !message;
+  $(id).setAttribute("aria-invalid", String(Boolean(message)));
+}
+
+// applies every message and returns the first invalid field's id ("" when all pass)
+function markErrors(errors) {
+  let first = "";
+  for (const [id, message] of Object.entries(errors)) {
+    setFieldError(id, message);
+    if (message && !first) first = id;
+  }
+  return first;
+}
+
+function clearForm(form) {
+  for (const input of form.querySelectorAll("input")) if ($(`${input.id}-error`)) setFieldError(input.id, "");
+  for (const button of form.querySelectorAll("[data-reveal]")) {
+    $(button.dataset.reveal).type = "password";
+    button.textContent = "Show";
+    button.setAttribute("aria-pressed", "false");
+  }
+  form.reset();
+}
+
+function showSetup() {
+  S.screen = "setup";
+  S.authed = false;
+  S.settings = false;
+  S.polling = null;
+  $("meta").textContent = "";
+  show();
+  $("setup-user").focus();
+}
+
+function showLogin() {
+  S.screen = "login";
+  S.authed = false;
+  S.settings = false;
+  S.polling = null;
+  $("meta").textContent = "";
+  clearForm($("login-form"));
+  say("login-status");
+  show();
+  $("login-user").focus();
+}
+
+async function submitSetup(event) {
+  event.preventDefault();
+  const user = $("setup-user").value.trim();
+  const password = $("setup-password").value;
+  const claude = $("setup-claude").value.trim();
+  const anki = $("setup-anki").value.trim();
+  const first = markErrors({
+    "setup-user": loginError(user),
+    "setup-password": passwordError(password),
+    "setup-repeat": password === $("setup-repeat").value ? "" : "The passwords don't match.",
+    "setup-claude": claudeError(claude),
+    "setup-anki": ankiError(anki),
+  });
+  if (first) return $(first).focus();
+  const submit = $("setup-submit");
+  submit.disabled = true;
+  submit.textContent = "Checking…";
+  say("setup-status", "Checking AnkiConnect and Claude, up to a minute…");
+  try {
+    await post("api/setup", { user, password, claude_token: claude, anki_key: anki });
+  } catch (err) {
+    submit.disabled = false;
+    submit.textContent = "Set up";
+    say("setup-status");
+    // someone else set the owner up first: the page routes to the login screen
+    if (err.code === "setup_done") return boot();
+    const id = SETUP_FIELDS[err.field];
+    if (id) {
+      setFieldError(id, err.message);
+      return $(id).focus();
+    }
+    say("setup-status", failure(err), true);
+    return;
+  }
+  clearForm($("setup-form"));
+  return boot();
+}
+
+async function submitLogin(event) {
+  event.preventDefault();
+  const user = $("login-user").value.trim();
+  const password = $("login-password").value;
+  if (!user || !password) return say("login-status", "Enter your login and password.", true);
+  const submit = $("login-submit");
+  submit.disabled = true;
+  say("login-status");
+  try {
+    await post("api/login", { user, password });
+  } catch (err) {
+    submit.disabled = false;
+    if (err.code === "setup") return boot();
+    say("login-status", err.status === 401 ? "Wrong login or password" : failure(err), true);
+    $("login-password").value = "";
+    return $("login-password").focus();
+  }
+  clearForm($("login-form"));
+  return boot();
+}
+
+async function logout() {
+  try {
+    await post("api/logout", {});
+  } catch {}
+  showLogin();
+}
+
+function openSettings() {
+  S.settings = true;
+  clearForm($("settings-form"));
+  say("set-status");
+  show();
+  $("set-current").focus();
+}
+
+function closeSettings() {
+  S.settings = false;
+  clearForm($("settings-form"));
+  show();
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const current = $("set-current").value;
+  const next = $("set-new").value;
+  const repeat = $("set-repeat").value;
+  const claude = $("set-claude").value.trim();
+  const anki = $("set-anki").value.trim();
+  const changing = next !== "" || repeat !== "";
+  const first = markErrors({
+    "set-current": current ? "" : "Enter your current password.",
+    "set-new": !changing ? "" : next === "" ? "Enter the new password too." : passwordError(next),
+    "set-repeat": next !== "" && next !== repeat ? "The passwords don't match." : "",
+    "set-claude": claudeError(claude),
+    "set-anki": ankiError(anki),
+  });
+  if (first) return $(first).focus();
+  // an empty optional field is not sent: the server keeps the current value
+  const body = { password: current };
+  if (next) body.new_password = next;
+  if (claude) body.claude_token = claude;
+  if (anki) body.anki_key = anki;
+  const submit = $("set-submit");
+  submit.disabled = true;
+  say("set-status");
+  try {
+    await post("api/settings", body);
+  } catch (err) {
+    submit.disabled = false;
+    if (err.code === "credentials") {
+      setFieldError("set-current", "Wrong current password.");
+      return $("set-current").focus();
+    }
+    const id = SETTINGS_FIELDS[err.field];
+    if (id) {
+      setFieldError(id, err.message);
+      return $(id).focus();
+    }
+    return say("set-status", failure(err), true);
+  }
+  submit.disabled = false;
+  clearForm($("settings-form"));
+  return say("set-status", "Saved.");
+}
+
+$("setup-form").addEventListener("submit", submitSetup);
+$("login-form").addEventListener("submit", submitLogin);
+$("settings-form").addEventListener("submit", saveSettings);
+$("settings-btn").addEventListener("click", openSettings);
+$("set-back").addEventListener("click", closeSettings);
+$("logout").addEventListener("click", logout);
+
 // ---------- boot ----------
 
 function showError() {
@@ -645,12 +902,22 @@ function showError() {
 }
 
 async function boot() {
+  let info;
+  try {
+    info = await (await fetch("api/session", { cache: "no-store" })).json();
+  } catch {
+    return showError();
+  }
+  if (info.state === "setup") return showSetup();
+  if (info.state === "login") return showLogin();
+  S.authed = true;
   let data;
   try {
-    const res = await fetch("api/cards", { cache: "no-store" });
+    const res = await call("api/cards", { cache: "no-store" });
     if (!res.ok) throw new Error(String(res.status));
     data = await res.json();
-  } catch {
+  } catch (err) {
+    if (err instanceof LoginRequired) return;
     return showError();
   }
   if (data.stage === "idle") return showStart();
@@ -679,9 +946,9 @@ async function boot() {
     return pollResults();
   }
   try {
-    showResults(await (await fetch("api/results", { cache: "no-store" })).json());
-  } catch {
-    showError();
+    showResults(await (await call("api/results", { cache: "no-store" })).json());
+  } catch (err) {
+    if (!(err instanceof LoginRequired)) showError();
   }
 }
 

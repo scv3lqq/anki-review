@@ -21,6 +21,8 @@
       <button type="button" data-view="list" aria-pressed="false">List</button>
     </div>
     <button type="button" class="btn ghost slim" id="back" hidden>Decks</button>
+    <button type="button" class="btn ghost slim" id="settings-btn" hidden>Settings</button>
+    <button type="button" class="btn ghost slim" id="logout" hidden>Log out</button>
   </div>
 </header>
 
@@ -74,6 +76,116 @@
     <h2>Server not responding</h2>
     <p>Reload the page a bit later. Your typed answers are saved in this browser.</p>
   </section>
+
+  <section id="setup" class="auth" hidden>
+    <h2>Set up</h2>
+    <p class="lede">Create the owner login. The server checks both tokens, then keeps them encrypted under this password.</p>
+    <form id="setup-form" novalidate>
+      <div class="field">
+        <label for="setup-user">Login</label>
+        <input id="setup-user" name="user" autocomplete="username" autocapitalize="none" spellcheck="false" aria-describedby="setup-user-error">
+        <p class="field-error" id="setup-user-error" hidden></p>
+      </div>
+      <div class="field">
+        <label for="setup-password">Password</label>
+        <input id="setup-password" name="password" type="password" autocomplete="new-password" aria-describedby="setup-password-error">
+        <p class="field-error" id="setup-password-error" hidden></p>
+        <div data-help="password"></div>
+      </div>
+      <div class="field">
+        <label for="setup-repeat">Repeat password</label>
+        <input id="setup-repeat" name="repeat" type="password" autocomplete="new-password" aria-describedby="setup-repeat-error">
+        <p class="field-error" id="setup-repeat-error" hidden></p>
+      </div>
+      <div class="field">
+        <label for="setup-claude">Claude token</label>
+        <div class="input-row">
+          <input id="setup-claude" class="mono" name="claude_token" type="password" autocomplete="off" spellcheck="false" aria-describedby="setup-claude-error">
+          <button type="button" class="btn ghost reveal" data-reveal="setup-claude" aria-pressed="false">Show</button>
+        </div>
+        <p class="field-error" id="setup-claude-error" hidden></p>
+        <div data-help="claude"></div>
+      </div>
+      <div class="field">
+        <label for="setup-anki">AnkiConnect key</label>
+        <div class="input-row">
+          <input id="setup-anki" class="mono" name="anki_key" type="password" autocomplete="off" spellcheck="false" aria-describedby="setup-anki-error">
+          <button type="button" class="btn ghost reveal" data-reveal="setup-anki" aria-pressed="false">Show</button>
+        </div>
+        <p class="field-error" id="setup-anki-error" hidden></p>
+        <div data-help="anki"></div>
+      </div>
+      <div class="auth-actions">
+        <button type="submit" class="btn primary" id="setup-submit">Set up</button>
+        <p class="status" id="setup-status" hidden></p>
+      </div>
+    </form>
+  </section>
+
+  <section id="login" class="auth" hidden>
+    <h2>Log in</h2>
+    <p class="lede">The server was restarted or you logged out. Logging in unlocks grading.</p>
+    <form id="login-form" novalidate>
+      <div class="field">
+        <label for="login-user">Login</label>
+        <input id="login-user" name="user" autocomplete="username" autocapitalize="none" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="login-password">Password</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password">
+      </div>
+      <div class="auth-actions">
+        <button type="submit" class="btn primary" id="login-submit">Log in</button>
+        <p class="status" id="login-status" hidden></p>
+      </div>
+    </form>
+  </section>
+
+  <section id="settings" class="auth" hidden>
+    <h2>Settings</h2>
+    <p class="lede">Change the password or a token. An empty field keeps its current value.</p>
+    <form id="settings-form" novalidate>
+      <div class="field">
+        <label for="set-current">Current password</label>
+        <input id="set-current" name="password" type="password" autocomplete="current-password" aria-describedby="set-current-error">
+        <p class="field-error" id="set-current-error" hidden></p>
+      </div>
+      <div class="field">
+        <label for="set-new">New password (optional)</label>
+        <input id="set-new" name="new_password" type="password" autocomplete="new-password" aria-describedby="set-new-error">
+        <p class="field-error" id="set-new-error" hidden></p>
+        <div data-help="password"></div>
+      </div>
+      <div class="field">
+        <label for="set-repeat">Repeat new password</label>
+        <input id="set-repeat" name="repeat" type="password" autocomplete="new-password" aria-describedby="set-repeat-error">
+        <p class="field-error" id="set-repeat-error" hidden></p>
+      </div>
+      <div class="field">
+        <label for="set-claude">New Claude token (optional)</label>
+        <div class="input-row">
+          <input id="set-claude" class="mono" name="claude_token" type="password" autocomplete="off" spellcheck="false" aria-describedby="set-claude-error">
+          <button type="button" class="btn ghost reveal" data-reveal="set-claude" aria-pressed="false">Show</button>
+        </div>
+        <p class="field-error" id="set-claude-error" hidden></p>
+        <div data-help="claude"></div>
+      </div>
+      <div class="field">
+        <label for="set-anki">New AnkiConnect key (optional)</label>
+        <div class="input-row">
+          <input id="set-anki" class="mono" name="anki_key" type="password" autocomplete="off" spellcheck="false" aria-describedby="set-anki-error">
+          <button type="button" class="btn ghost reveal" data-reveal="set-anki" aria-pressed="false">Show</button>
+        </div>
+        <p class="field-error" id="set-anki-error" hidden></p>
+        <div data-help="anki"></div>
+      </div>
+      <div class="auth-actions">
+        <button type="submit" class="btn primary" id="set-submit">Save</button>
+        <button type="button" class="btn ghost" id="set-back">Back</button>
+        <p class="status" id="set-status" hidden></p>
+      </div>
+    </form>
+  </section>
 </main>
 
 <div class="bar" id="start-bar" hidden>
@@ -106,5 +218,31 @@
     <button type="button" class="btn primary" id="to-decks" hidden>Back to decks</button>
   </div>
 </div>
+
+<template id="tpl-claude">
+  <details class="help">
+    <summary>How to get it</summary>
+    <ul>
+      <li>On a computer with Claude Code, where <code>claude</code> is logged in to your Claude account (Pro, Max, Team or Enterprise), run <code>claude setup-token</code> in a terminal.</li>
+      <li>It opens the browser: approve the access. The terminal then prints a token that starts with <code>sk-ant-oat01-</code>. It is valid for one year and grading uses your subscription.</li>
+      <li>Paste it here. An Anthropic API key (<code>sk-ant-api03-...</code>) works too, billed per use.</li>
+      <li>Leave it empty only when this server runs on your own computer and <code>claude</code> already works there for the account that runs the server.</li>
+    </ul>
+  </details>
+</template>
+
+<template id="tpl-anki">
+  <details class="help">
+    <summary>How to get it</summary>
+    <ul>
+      <li>Anki on your computer: in Anki open Tools &gt; Add-ons, select AnkiConnect, press Config and copy the value of <code>apiKey</code>. If it is <code>null</code>, leave this field empty.</li>
+      <li>A server set up with the deploy kit: the key was generated during the deploy. With Claude Code, <code>/setup-anki-review server</code> puts it on your clipboard; by hand, run <code>cat &lt;deploy dir&gt;/anki/secrets/ankiconnect-key</code> on the server.</li>
+    </ul>
+  </details>
+</template>
+
+<template id="tpl-password">
+  <p class="note">At least 12 characters. It encrypts both tokens on the server: they are decrypted only in the server's memory after you log in, so a copy of its disk doesn't reveal them. After a server restart, log in again to unlock grading. A forgotten password can't be recovered: delete <code>vault.json</code> in the server's data directory and set up again.</p>
+</template>
 </body>
 </html>

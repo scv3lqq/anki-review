@@ -30,6 +30,7 @@ func run() error {
 		return err
 	}
 	log := newLogger(cfg.LogLevel)
+	dropLegacySecrets(log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -39,6 +40,20 @@ func run() error {
 		return err
 	}
 	return a.Run(ctx)
+}
+
+// dropLegacySecrets: the tokens are entered on the setup page now. A value still in the environment is
+// ignored, and removed from this process so that no child process inherits it.
+func dropLegacySecrets(log zerolog.Logger) {
+	for _, name := range []string{"ANKI_CONNECT_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} {
+		if _, ok := os.LookupEnv(name); !ok {
+			continue
+		}
+		log.Warn().Str("variable", name).Msg("ignored: enter the value on the setup page and remove it from the environment")
+		if err := os.Unsetenv(name); err != nil {
+			log.Warn().Err(err).Str("variable", name).Msg("could not remove from the environment")
+		}
+	}
 }
 
 // newLogger writes JSON lines (journald, log shippers) unless stderr is a terminal.

@@ -38,6 +38,7 @@ type Anki struct {
 	cards    []*Card
 	answered []Answer
 	syncs    int
+	key      string
 	srv      *httptest.Server
 }
 
@@ -61,6 +62,13 @@ func New(t *testing.T, cards ...Card) *Anki {
 // URL of the AnkiConnect endpoint.
 func (a *Anki) URL() string { return a.srv.URL }
 
+// RequireKey makes every request without this apiKey fail, as AnkiConnect does when apiKey is set.
+func (a *Anki) RequireKey(key string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.key = key
+}
+
 // Answered lists the answers received so far.
 func (a *Anki) Answered() []Answer {
 	a.mu.Lock()
@@ -75,6 +83,9 @@ func (a *Anki) Syncs() int {
 	return a.syncs
 }
 
+// The apiKey AnkiConnect checks on every request.
+const keyError = "valid api key must be provided"
+
 type params struct {
 	Query   string   `json:"query"`
 	Cards   []int64  `json:"cards"`
@@ -85,6 +96,7 @@ type params struct {
 func (a *Anki) serve(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Action string `json:"action"`
+		Key    string `json:"key"`
 		Params params `json:"params"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -92,7 +104,13 @@ func (a *Anki) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
-	result, errMsg := a.handle(req.Action, req.Params)
+	var result any
+	var errMsg string
+	if a.key != "" && req.Key != a.key {
+		errMsg = keyError
+	} else {
+		result, errMsg = a.handle(req.Action, req.Params)
+	}
 	a.mu.Unlock()
 	var e any
 	if errMsg != "" {
@@ -103,6 +121,8 @@ func (a *Anki) serve(w http.ResponseWriter, r *http.Request) {
 
 func (a *Anki) handle(action string, p params) (any, string) {
 	switch action {
+	case "version":
+		return 6, ""
 	case "deckNames":
 		var names []string
 		for _, c := range a.cards {

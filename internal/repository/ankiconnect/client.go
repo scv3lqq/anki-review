@@ -20,20 +20,40 @@ const (
 	httpTimeout  = 2 * time.Minute
 	lockedMarker = "lifecycle operation is active"
 	queueMarker  = "not at top of queue"
+	// AnkiConnect's answer when apiKey is set and the request doesn't carry it
+	keyMarker = "valid api key must be provided"
 )
 
 // Client is an AnkiConnect client. Grades go through `answerCards`, i.e. Anki's own scheduler and
 // revlog, exactly like pressing a button in the reviewer.
 type Client struct {
-	url      string
-	key      string
-	http     *http.Client
+	url  string
+	key  func() string
+	http *http.Client
+	// lockWait is a field so tests don't wait a second per retry
 	lockWait time.Duration
 }
 
-// New returns a client for the AnkiConnect endpoint; key is AnkiConnect's optional apiKey.
-func New(url, key string) *Client {
+// New returns a client for the AnkiConnect endpoint. key is read on every call: it is AnkiConnect's
+// optional apiKey, which the owner may change on the settings page.
+func New(url string, key func() string) *Client {
+	if key == nil {
+		key = func() string { return "" }
+	}
 	return &Client{url: url, key: key, http: &http.Client{Timeout: httpTimeout}, lockWait: lockWait}
+}
+
+// Version checks that AnkiConnect answers with the API version this client speaks, using the key.
+// A refused key gives domain.ErrAnkiKey; no answer gives domain.ErrAnki.
+func (c *Client) Version(ctx context.Context) error {
+	var v int
+	if err := c.call(ctx, "version", nil, &v); err != nil {
+		return fmt.Errorf("ankiconnect version: %w", err)
+	}
+	if v != apiVersion {
+		return fmt.Errorf("ankiconnect version: %w: API version %d, want %d", domain.ErrAnki, v, apiVersion)
+	}
+	return nil
 }
 
 type request struct {
@@ -49,7 +69,7 @@ type response struct {
 }
 
 func (c *Client) call(ctx context.Context, action string, params, out any) error {
-	body, err := json.Marshal(request{Action: action, Version: apiVersion, Params: params, Key: c.key})
+	body, err := json.Marshal(request{Action: action, Version: apiVersion, Params: params, Key: c.key()})
 	if err != nil {
 		return fmt.Errorf("ankiconnect %s: encode: %w", action, err)
 	}
@@ -76,6 +96,9 @@ func (c *Client) call(ctx context.Context, action string, params, out any) error
 			case <-time.After(c.lockWait):
 			}
 			continue
+		}
+		if strings.Contains(msg, keyMarker) {
+			return fmt.Errorf("ankiconnect %s: %w: %s", action, domain.ErrAnkiKey, msg)
 		}
 		if strings.Contains(msg, queueMarker) {
 			return fmt.Errorf("ankiconnect %s: %w: %s", action, domain.ErrQueueBusy, msg)

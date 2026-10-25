@@ -45,7 +45,7 @@ func newFake(t *testing.T, handle func(action string, params json.RawMessage) (a
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	t.Cleanup(srv.Close)
-	c := New(srv.URL, "secret")
+	c := New(srv.URL, func() string { return "secret" })
 	c.lockWait = time.Millisecond
 	return c, f
 }
@@ -62,6 +62,7 @@ func TestCallErrors(t *testing.T) {
 		{"locked for too long", repeat(lockedMarker, lockRetries), domain.ErrAnki, lockRetries},
 		{"queue busy", []string{"card 1 not at top of queue"}, domain.ErrQueueBusy, 1},
 		{"other error", []string{"collection is not available"}, domain.ErrAnki, 1},
+		{"key refused", []string{"valid api key must be provided"}, domain.ErrAnkiKey, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -88,8 +89,59 @@ func TestCallErrors(t *testing.T) {
 func TestCallUnreachable(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	srv.Close()
-	if err := New(srv.URL, "").Sync(context.Background()); !errors.Is(err, domain.ErrAnki) {
+	if err := New(srv.URL, nil).Sync(context.Background()); !errors.Is(err, domain.ErrAnki) {
 		t.Fatalf("Sync() error = %v, want ErrAnki", err)
+	}
+}
+
+func TestVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		result  any
+		errMsg  string
+		wantErr error
+	}{
+		{name: "version 6", result: 6},
+		{name: "key refused", errMsg: "valid api key must be provided", wantErr: domain.ErrAnkiKey},
+		{name: "other API version", result: 5, wantErr: domain.ErrAnki},
+		{name: "other error", errMsg: "collection is not available", wantErr: domain.ErrAnki},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, f := newFake(t, func(string, json.RawMessage) (any, string) { return tt.result, tt.errMsg })
+			err := c.Version(context.Background())
+			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil) != (err == nil) {
+				t.Fatalf("Version() error = %v, want %v", err, tt.wantErr)
+			}
+			if len(f.requests) != 1 || f.requests[0].Action != "version" {
+				t.Errorf("requests = %+v, want one version call", f.requests)
+			}
+		})
+	}
+}
+
+func TestVersionKeyNotAnkiKeyWhenUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+	err := New(srv.URL, nil).Version(context.Background())
+	if !errors.Is(err, domain.ErrAnki) || errors.Is(err, domain.ErrAnkiKey) {
+		t.Fatalf("Version() error = %v, want ErrAnki and not ErrAnkiKey", err)
+	}
+}
+
+func TestKeyReadOnEveryCall(t *testing.T) {
+	key := "first"
+	c, f := newFake(t, func(string, json.RawMessage) (any, string) { return 6, "" })
+	c.key = func() string { return key }
+	if err := c.Version(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	key = "second"
+	if err := c.Version(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.requests) != 2 || f.requests[0].Key != "first" || f.requests[1].Key != "second" {
+		t.Errorf("keys sent = %+v, want first then second", f.requests)
 	}
 }
 
