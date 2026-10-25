@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # gitleaks scans only the pushed range and fails on a force push that
+  # rewrites the root commit; a manual run scans the full history.
+  workflow_dispatch:
 
 permissions:
   contents: read
