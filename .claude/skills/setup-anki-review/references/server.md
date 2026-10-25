@@ -65,10 +65,13 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
        A user starting with no cards at all skips that.
      - `S tunnel` with `run_in_background` (keep its task id), `S vnc-password`,
        `open vnc://127.0.0.1:5901`. Tell the user: "Paste the password (Cmd+V) into Screen Sharing. In
-       Anki: Tools, Preferences, Syncing: Log Out if it shows an account, set Self-hosted sync server to
-       `http://sync:8766/`, close Preferences and click Sync. Tell me when the login form shows."
-     - Then `S sync-password` and tell the user: "Log in as `anki` with the password (Cmd+V). Choose
-       **Download**: the server has your collection. I watch for the decks."
+       Anki: Tools, Preferences, Syncing (the field is at the bottom of the AnkiWeb Account box): Log
+       Out if it shows an account, set Self-hosted sync server to `http://sync:8766/`, close
+       Preferences and click Sync. Tell me when the login form shows."
+     - Then `S sync-password` and tell the user: "In Screen Sharing turn on Edit, Use Shared Clipboard.
+       Log in as `anki` and paste the password with Ctrl+V (inside the session it is Ctrl, not Cmd; if
+       it still won't paste, paste it into a local note and type it). Choose **Download**: the server
+       has your collection. I watch for the decks."
      - `S wait-decks N` with `run_in_background`, end the turn. When it prints the new count:
        `S clip-clear`, stop the tunnel task (TaskStop). Timeout: ask what Anki shows.
 6. Knowledge decks: `S deck-names` lists the server collection's top-level decks with the kind
@@ -157,9 +160,9 @@ state, deck options, media).
    `reverse_proxy` transport. Ask for the URL, write `DEPLOY_SYNC_URL` (ending in `/`) into `.env`,
    run `S verify-url`: expect `health: 200`.
 4. `S sync-password` (clipboard), then tell the user: "In Anki on your computer: Tools, Preferences,
-   Syncing: Log Out, set Self-hosted sync server to <DEPLOY_SYNC_URL>, close Preferences, click
-   Sync and log in as `anki` with the password (Cmd+V). The server is empty, so Anki uploads your
-   collection. Tell me when the media has finished (the sync button stops spinning)."
+   Syncing (the field is at the bottom of the AnkiWeb Account box): Log Out, set Self-hosted sync
+   server to <DEPLOY_SYNC_URL>, close Preferences, click Sync and log in as `anki` with the password
+   (Cmd+V). The server is empty, so Anki uploads your collection. Tell me when the media has finished (the sync button stops spinning)."
 5. `S clip-clear`, `S status`: the `sync:` line shows `collection X MB, N media files`. N should match
    the number of files in the computer's `collection.media` folder
    (`ls <Anki2>/<profile>/collection.media | wc -l`, read-only); ask the user to sync once more when
