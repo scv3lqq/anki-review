@@ -246,7 +246,7 @@ func (c *Client) Answer(ctx context.Context, answers []domain.CardAnswer) ([]boo
 	return ok, nil
 }
 
-// Sync syncs the collection with AnkiWeb.
+// Sync syncs the collection with the server Anki is logged in to (AnkiWeb or self-hosted).
 func (c *Client) Sync(ctx context.Context) error {
 	return c.call(ctx, "sync", nil, nil)
 }

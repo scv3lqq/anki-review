@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 # Headless Anki desktop with AnkiConnect for the anki-review service. The display is Xvnc with a VNC
-# password, kept for the one-time AnkiWeb login and full download, which AnkiConnect can't do.
+# password, kept for the one-time sync login and full download, which AnkiConnect can't do. The same
+# image runs Anki's built-in sync server for the self-hosted mode (syncserver.sh).
 
 ARG DEBIAN=debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
@@ -45,20 +46,21 @@ ARG ANKI_UID=1000
 ARG ANKI_GID=1000
 RUN groupadd -g "${ANKI_GID}" anki \
   && useradd -u "${ANKI_UID}" -g "${ANKI_GID}" -d /home/anki -s /usr/sbin/nologin anki \
-  && install -d -o anki -g anki -m 0700 /data /home/anki
+  && install -d -o anki -g anki -m 0700 /data /home/anki /sync
 
 COPY --from=fetch /opt/anki /opt/anki
 COPY --from=fetch /opt/ankiconnect /opt/ankiconnect
 # --chmod also sets the mode of the directory COPY creates: 0644 would leave it without the x bit
 # and the anki user could not open the entrypoint.
-COPY --chmod=0755 entrypoint.sh setup-profile.py /usr/local/lib/anki/
+COPY --chmod=0755 entrypoint.sh setup-profile.py syncserver.sh /usr/local/lib/anki/
 RUN /opt/anki/python/bin/python3 -I -c 'import pickle, sqlite3' \
   && setpriv --reuid=anki --regid=anki --clear-groups \
-    test -r /usr/local/lib/anki/entrypoint.sh -a -r /usr/local/lib/anki/setup-profile.py
+    test -r /usr/local/lib/anki/entrypoint.sh -a -r /usr/local/lib/anki/setup-profile.py \
+    -a -r /usr/local/lib/anki/syncserver.sh
 
 # The container is the sandbox: Chromium's own needs user namespaces, which Docker's seccomp blocks.
 ENV LANG=C.UTF-8 HOME=/home/anki DISPLAY=:1 QTWEBENGINE_DISABLE_SANDBOX=1
 USER anki
 VOLUME /data
-EXPOSE 5900 8765
+EXPOSE 5900 8765 8766
 ENTRYPOINT ["/bin/sh", "/usr/local/lib/anki/entrypoint.sh"]

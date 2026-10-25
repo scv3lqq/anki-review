@@ -30,7 +30,7 @@ const (
 type Options struct {
 	// KnowledgeDecks are top-level decks graded by meaning; the rest are language decks.
 	KnowledgeDecks []string
-	// Sync with AnkiWeb before taking cards and after writing grades.
+	// Sync with Anki's sync server before taking cards and after writing grades.
 	Sync       bool
 	Log        zerolog.Logger
 	Now        func() time.Time

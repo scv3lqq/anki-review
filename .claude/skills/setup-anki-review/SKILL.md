@@ -19,10 +19,10 @@ they disagree; this skill only orders them. Run every command from the repositor
 
 Rules for every mode:
 
-- Claude does every step itself. The user types the AnkiWeb password (server), the sudo password
-  (server, once) and the setup form on the page: owner login, owner password, Claude token, AnkiConnect
-  key. Logging in, installing a GUI app and anything with a password stay theirs; installs Claude runs
-  (Go, AnkiConnect) take one yes first.
+- Claude does every step itself. The user types the AnkiWeb password or pastes the self-hosted sync
+  password (server), the sudo password (server, once) and the setup form on the page: owner login,
+  owner password, Claude token, AnkiConnect key. Logging in, installing a GUI app and anything with a
+  password stay theirs; installs Claude runs (Go, AnkiConnect) take one yes first.
 - Claude never sees the owner login, the owner password or either token. Before the user fills the
   page, Claude explains in chat how to get each token (the user runs the commands on their machine):
   - Claude token: on a computer with Claude Code logged in to the account, run `claude setup-token`
@@ -31,9 +31,9 @@ Rules for every mode:
     the user's own computer, as the account that already has `claude` working.
   - AnkiConnect key: in Anki, Tools > Add-ons, select AnkiConnect, Config, copy `apiKey`; `null`
     means empty. On a server, the key is `server.sh anki-key` (clipboard, never shown).
-- Secrets (AnkiConnect key, VNC password, Claude token, owner password) never appear in argv, in
-  output or in this conversation: they move through pipes, files or the page inside the helper
-  scripts. Don't `cat` them.
+- Secrets (AnkiConnect key, VNC password, sync server password, Claude token, owner password) never
+  appear in argv, in output or in this conversation: they move through pipes, files or the page
+  inside the helper scripts. Don't `cat` them.
   ssh, scp, the clipboard and AppleScript run only inside `server.sh`, so no raw `ssh` or `curl`
   call is pre-approved: any other one gets a permission prompt.
 - Setup never writes to the user's Anki: no `POST` to the API (`/api/confirm` above all), never the
@@ -110,7 +110,9 @@ explain the two kinds in one line each, ask which decks are knowledge decks (one
 multiSelect; more than 4 decks: the likeliest 4, the rest via Other), then set
 `KNOWLEDGE_DECKS=<names, comma-separated, as Anki shows them>` in `.env` (create it as in the
 rules). A name with a comma can't be listed; every deck as language: `KNOWLEDGE_DECKS=,`. Other
-values only when they apply: `ANKI_SYNC=false` (no AnkiWeb account), `CLAUDE_MODEL`, `PORT`.
+values only when they apply: `ANKI_SYNC=false` (Anki logged in to no sync server: neither AnkiWeb nor a
+self-hosted one), `CLAUDE_MODEL`, `PORT`. Locally, Anki syncs with whatever server its Preferences
+name (AnkiWeb or a self-hosted one); anki-review only presses Sync, so nothing here changes.
 
 ## 4. Run, set up and verify
 

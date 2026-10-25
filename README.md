@@ -39,8 +39,8 @@ The first time, the page asks you to set up an owner login and enter the two tok
 3. **Check answers** sends the answers. The server grades the whole batch with one `claude -p` call.
    The answer keys reach the page only now, together with the grades.
 4. Change any grade you disagree with and press **Save to Anki**. The server answers the cards through
-   AnkiConnect and syncs with AnkiWeb. A card reviewed elsewhere in the meantime is skipped, not
-   answered twice.
+   AnkiConnect and syncs Anki with its sync server (AnkiWeb or a self-hosted one). A card reviewed
+   elsewhere in the meantime is skipped, not answered twice.
 5. Take more cards from the same deck (**More cards**) or go back to the deck list (**Decks**).
 
 Decks listed in `KNOWLEDGE_DECKS` (top-level names) are graded by meaning. All other decks are graded
@@ -50,7 +50,8 @@ as language cards: the exact word, its form, collocation and spelling count.
 
 - [Go](https://go.dev/dl/) 1.27 or newer, to build.
 - [Anki](https://apps.ankiweb.net/) desktop with the [AnkiConnect](https://ankiweb.net/shared/info/2055492159)
-  add-on (code `2055492159`). Anki must be running while you review.
+  add-on (code `2055492159`). Anki must be running while you review. It may sync with AnkiWeb or with a
+  self-hosted sync server: anki-review only presses Sync.
 - [Claude Code](https://docs.claude.com/en/docs/claude-code/overview), logged in: `claude -p "hi"`
   answers in a terminal. Grading uses your Claude subscription or API key.
 
@@ -104,8 +105,10 @@ logged in, **Settings** changes the password or either token; an empty field kee
 
 [deploy/README.md](deploy/README.md) runs it on a Linux server: Anki headless in Docker, the app as a
 hardened systemd service behind your own reverse proxy. With Claude Code, `/setup-anki-review server`
-does the whole deploy over ssh; you type the AnkiWeb password in the VNC window, the sudo password and
-the setup form on the page. `/setup-anki-review server-update` ships a new build.
+does the whole deploy over ssh; you log in to the sync server in the VNC window and type the sudo
+password and the setup form on the page. `/setup-anki-review server-update` ships a new build.
+Anki there syncs through AnkiWeb or through Anki's own sync server on the same host
+([self-hosted](deploy/README.md#sync-server-ankiweb-or-self-hosted)).
 
 ## Use
 
@@ -134,7 +137,7 @@ Environment variables, all optional. To keep them in a file, `cp .env.example .e
 | `DATA_DIR` | `./data` | State of the current pass (it holds the answer keys) and `vault.json` (the sealed tokens). The directory is `0700`, the files `0600` |
 | `KNOWLEDGE_DECKS` | `Tech,Career` | Top-level decks graded by meaning, comma-separated |
 | `ANKI_CONNECT_URL` | `http://127.0.0.1:8765` | AnkiConnect endpoint |
-| `ANKI_SYNC` | `true` | Sync with AnkiWeb before a pass and after writing grades |
+| `ANKI_SYNC` | `true` | Sync Anki with its sync server (AnkiWeb or self-hosted) before a pass and after writing grades |
 | `CLAUDE_BIN` | `claude` | Claude Code binary |
 | `CLAUDE_MODEL` | the CLI's default | Model for grading, for example `sonnet` |
 | `GRADE_TIMEOUT` | `5m` | Longest time one grading call may take |

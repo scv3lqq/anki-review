@@ -1,31 +1,32 @@
 #!/usr/bin/env bash
 # Server steps of deploy/README.md for the setup skill, from DEPLOY_SSH, DEPLOY_SSH_PORT, DEPLOY_DIR,
-# DEPLOY_PORT (the service port, default 8767) and DEPLOY_URL in .env (or the environment). Secrets
-# (VNC password, AnkiConnect key) travel only through pipes and files: never argv, never this script's
-# output. The Claude token and the owner's password never reach this script: the owner types them
-# into the setup page.
+# DEPLOY_PORT (the service port, default 8767), DEPLOY_URL, DEPLOY_SYNC and DEPLOY_SYNC_URL in .env
+# (or the environment). Secrets (VNC password, AnkiConnect key, sync server password) travel only
+# through pipes and files: never argv, never this script's output. The Claude token and the owner's
+# password never reach this script: the owner types them into the setup page.
 #
 #   server.sh precheck [update]  read-only host checks (exit 1 on FAIL)
 #   server.sh upload             the kit and bin/anki-review-linux-amd64 into DEPLOY_DIR (0700)
 #   server.sh upload-bin         only the binary, swapped in atomically
 #   server.sh kit-diff           kit files that differ from the host's copy
-#   server.sh up                 DEPLOY_DIR/anki/up.sh on the host (no sudo)
+#   server.sh up                 DEPLOY_DIR/anki/up.sh on the host (no sudo), in the DEPLOY_SYNC mode when set
 #   server.sh decks              deck count through the host's AnkiConnect
 #   server.sh deck-names         its top-level decks and their kind under KNOWLEDGE_DECKS
 #   server.sh wait-decks N       until the deck count exceeds N (30 min at most)
 #   server.sh tunnel             VNC tunnel 127.0.0.1:5901 to the host's 5900, until killed
 #   server.sh vnc-password       the VNC password into the clipboard
 #   server.sh anki-key           the AnkiConnect key into the clipboard, for the setup page
+#   server.sh sync-password      the sync server password into the clipboard (login anki, self-hosted mode)
 #   server.sh app-tunnel         tunnel 127.0.0.1:8768 to the service port, until killed (setup page)
 #   server.sh wait-setup         until the owner is set up and logged in on the page (30 min at most)
 #   server.sh clip-clear         empties the clipboard
 #   server.sh window NAME CMD    CMD in a new tmux window or Terminal window; prints its exit file
 #   server.sh install            sudo install.sh in a new window; prints the exit file
 #   server.sh wait-install FILE  until that window ends or the service restarts (30 min at most)
-#   server.sh status             service, owner (setup, locked, unlocked), API stage, decks, binary, polkit
+#   server.sh status             service, owner (setup, locked, unlocked), API stage, decks, sync, binary, polkit
 #   server.sh restart            systemctl restart without sudo (the polkit rule from install.sh)
 #   server.sh sudo-restart       the same with sudo, in a new window; prints the exit file
-#   server.sh verify-url         DEPLOY_URL/api/session
+#   server.sh verify-url         DEPLOY_URL/api/session, and DEPLOY_SYNC_URL/health when set
 set -euo pipefail
 
 here=$(dirname -- "$0")
@@ -41,8 +42,8 @@ die() {
 svc="anki-review"
 bin_local=$root/bin/anki-review-linux-amd64
 kit_top="install.sh smoke.sh"
-kit_anki="Dockerfile compose.yaml entrypoint.sh setup-profile.py up.sh"
-kit_all="$kit_top systemd/anki-review.service anki/Dockerfile anki/compose.yaml anki/entrypoint.sh anki/setup-profile.py anki/up.sh"
+kit_anki="Dockerfile compose.yaml entrypoint.sh setup-profile.py syncserver.sh up.sh"
+kit_all="$kit_top systemd/anki-review.service anki/Dockerfile anki/compose.yaml anki/entrypoint.sh anki/setup-profile.py anki/syncserver.sh anki/up.sh"
 host=$(trim "${DEPLOY_SSH:-}")
 port=$(trim "${DEPLOY_SSH_PORT:-}")
 port=${port:-22}
@@ -261,8 +262,14 @@ cmd_kit_diff() {
 }
 
 cmd_up() {
+  local mode
   resolve_dir
-  rsh "$(q "$dir/anki/up.sh")"
+  mode=$(trim "${DEPLOY_SYNC:-}")
+  case $mode in
+  '') rsh "$(q "$dir/anki/up.sh")" ;;
+  ankiweb | self-hosted) rsh "$(q "$dir/anki/up.sh") $mode" ;;
+  *) die "DEPLOY_SYNC must be ankiweb or self-hosted: $mode" ;;
+  esac
 }
 
 deck_names_json() {
@@ -375,6 +382,17 @@ cmd_anki_key() {
   echo "AnkiConnect key copied to the clipboard"
 }
 
+cmd_sync_password() {
+  local pw
+  resolve_dir
+  pw=$(rsh "cat $(q "$dir/anki/secrets/sync-password")") || die "can't read the sync server password: did up.sh run?"
+  pw=$(trim "$pw")
+  [ "${#pw}" -eq 24 ] || die "the sync server password file looks wrong"
+  printf '%s' "$pw" | clip_copy
+  unset pw
+  echo "sync server password copied to the clipboard (login: anki)"
+}
+
 # The setup page of the host's service, reached from this machine at http://127.0.0.1:8768/.
 cmd_app_tunnel() {
   need_host
@@ -459,6 +477,10 @@ s=$(curl -sS -m 5 "http://127.0.0.1:$2/api/session" 2>/dev/null | head -c 100000
 echo "session=$s"
 # A binary from before the login has no /api/session (404 text): its /api/cards is the old open answer.
 case $s in '{'*) ;; *) echo "cards=$(curl -sS -m 5 "http://127.0.0.1:$2/api/cards" 2>/dev/null | head -c 100000 | tr -d '\n')" ;; esac
+echo "sync_mode=$(cat "$1/anki/sync-mode" 2>/dev/null)"
+echo "sync_state=$(docker inspect -f '{{.State.Status}}' anki-sync 2>/dev/null)"
+echo "sync_port=$(docker port anki-sync 8766/tcp 2>/dev/null | head -n 1)"
+echo "sync_data=$(docker exec anki-sync sh -c 'printf "%s %s" "$(stat -c %s /sync/anki/collection.anki2 2>/dev/null || echo none)" "$(ls /sync/anki/media 2>/dev/null | wc -l)"' 2>/dev/null)"
 # install.sh leaves this file, no secrets in it; only the polkit line is read (older files carry token=)
 [ ! -f "$1/install-state" ] || sed -n 's/^polkit=/state_&/p' "$1/install-state"
 EOF
@@ -508,6 +530,23 @@ else:
         print("owner: no answer on 127.0.0.1:" + app)
         print("api stage: no answer on 127.0.0.1:" + app)
 print("decks:", v.get("anki_decks") or "no answer from AnkiConnect (down, or the key is wrong?)")
+mode = v.get("sync_mode", "").strip()
+if mode in ("", "ankiweb"):
+    print("sync: AnkiWeb")
+elif mode != "self-hosted":
+    print("sync: unknown mode " + mode)
+else:
+    state = v.get("sync_state", "").strip() or "missing"
+    where = v.get("sync_port", "").strip() or "no published port"
+    parts = v.get("sync_data", "").split()
+    if state != "running":
+        print("sync: self-hosted, anki-sync " + state)
+    elif len(parts) != 2:
+        print("sync: self-hosted, anki-sync running on %s, no answer about its data" % where)
+    elif parts[0] == "none":
+        print("sync: self-hosted, anki-sync running on %s, no collection yet" % where)
+    else:
+        print("sync: self-hosted, anki-sync running on %s, collection %.1f MB, %s media files" % (where, int(parts[0]) / 1e6, parts[1]))
 print("polkit rule:", v.get("state_polkit", "unknown (no install-state)"))
 want, got = os.environ.get("WANT"), v.get("bin", "")
 if not got:
@@ -538,11 +577,9 @@ cmd_sudo_restart() {
   echo "$exitf"
 }
 
-cmd_verify_url() {
+verify_app_url() {
   local url body code
-  url=$(trim "${DEPLOY_URL:-}")
-  [ -n "$url" ] || die "DEPLOY_URL is not set"
-  url=${url%/}
+  url=${1%/}
   body=$(curl -sS -m 30 -w '\n%{http_code}' "$url/api/session" 2>&1) || true
   code=${body##*$'\n'}
   body=${body%$'\n'*}
@@ -573,8 +610,31 @@ except (ValueError, KeyError, TypeError):
   esac
 }
 
+# Anki's sync server answers GET /health with 200. Clients need the URL with its trailing /.
+verify_sync_url() {
+  local url code
+  url=${1%/}/
+  code=$(curl -sS -o /dev/null -m 30 -w '%{http_code}' "${url}health" 2>/dev/null) || true
+  if [ "$code" = 200 ]; then
+    echo "${url}health: 200, the sync server answers"
+  else
+    echo "${url}health: FAIL, HTTP ${code:-none}: the proxy must forward to the host's 127.0.0.1:8766 (SYNC_PORT), with no login in front"
+    return 1
+  fi
+}
+
+cmd_verify_url() {
+  local url sync_url rc=0
+  url=$(trim "${DEPLOY_URL:-}")
+  sync_url=$(trim "${DEPLOY_SYNC_URL:-}")
+  [ -n "$url" ] || [ -n "$sync_url" ] || die "neither DEPLOY_URL nor DEPLOY_SYNC_URL is set"
+  if [ -n "$url" ]; then verify_app_url "$url" || rc=1; fi
+  if [ -n "$sync_url" ]; then verify_sync_url "$sync_url" || rc=1; fi
+  return "$rc"
+}
+
 case ${1:-} in
-precheck | upload | upload-bin | kit-diff | up | decks | deck-names | wait-decks | tunnel | vnc-password | anki-key | \
+precheck | upload | upload-bin | kit-diff | up | decks | deck-names | wait-decks | tunnel | vnc-password | anki-key | sync-password | \
   app-tunnel | wait-setup | install | wait-install | status | restart | sudo-restart) need_host ;;
 esac
 case ${1:-} in
@@ -589,6 +649,7 @@ wait-decks) cmd_wait_decks "${2:-1}" ;;
 tunnel) cmd_tunnel ;;
 vnc-password) cmd_vnc_password ;;
 anki-key) cmd_anki_key ;;
+sync-password) cmd_sync_password ;;
 app-tunnel) cmd_app_tunnel ;;
 wait-setup) cmd_wait_setup ;;
 clip-clear) cmd_clip_clear ;;

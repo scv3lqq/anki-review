@@ -1,5 +1,7 @@
 # Headless Anki + AnkiConnect for anki-review. Start it with up.sh, which creates the secrets first.
-# ANKI_UID/ANKI_GID: the host user's ids (up.sh sets them). ANKI_CONNECT_PORT, VNC_PORT: host ports.
+# ANKI_UID/ANKI_GID: the host user's ids (up.sh sets them). ANKI_CONNECT_PORT, VNC_PORT, SYNC_PORT:
+# host ports.
+# The sync service runs only with the self-hosted profile (up.sh self-hosted).
 name: anki-review
 
 services:
@@ -9,7 +11,7 @@ services:
       args:
         ANKI_UID: ${ANKI_UID:-1000}
         ANKI_GID: ${ANKI_GID:-1000}
-    image: anki-desktop:26.09.3-ac26.10.14.0
+    image: &image anki-desktop:26.09.3-ac26.10.14.0
     container_name: anki-desktop
     init: true
     restart: unless-stopped
@@ -41,12 +43,53 @@ services:
         max-size: 10m
         max-file: "3"
 
+  # Anki's built-in sync server: the same image, built by the anki service. The Anki above reaches it
+  # as http://sync:8766/, other devices through the owner's HTTPS proxy on the host port.
+  sync:
+    image: *image
+    pull_policy: never
+    profiles: [self-hosted]
+    container_name: anki-sync
+    init: true
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/usr/local/lib/anki/syncserver.sh"]
+    environment:
+      NO_COLOR: "1"
+      # AnkiWeb's limit by default; a bigger collection needs more here and in the proxy.
+      MAX_SYNC_PAYLOAD_MEGS: ${SYNC_MAX_PAYLOAD_MEGS:-100}
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /home/anki:size=16m,uid=${ANKI_UID:-1000},gid=${ANKI_GID:-1000},mode=0700
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Published ports bypass ufw: the 127.0.0.1 bind keeps it off the internet, the proxy adds TLS.
+    ports:
+      - "127.0.0.1:${SYNC_PORT:-8766}:8766"
+    volumes:
+      - anki-sync:/sync
+    secrets:
+      - sync_password
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
 secrets:
   ankiconnect_key:
     file: ./secrets/ankiconnect-key
   vnc_password:
     file: ./secrets/vnc-password
+  sync_password:
+    file: ./secrets/sync-password
 
 volumes:
   anki-data:
     name: anki-data
+  anki-sync:
+    name: anki-sync

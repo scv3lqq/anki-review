@@ -3,9 +3,9 @@
 The flow of deploy/README.md, driven from this machine. `S` below is
 `.claude/skills/setup-anki-review/server.sh` (run `S` alone for its commands). It reads
 `DEPLOY_SSH`, `DEPLOY_SSH_PORT`, `DEPLOY_DIR`, `DEPLOY_PORT` (the service's PORT on the host, default
-8767) and `DEPLOY_URL` from `.env`, runs ssh in batch mode and keeps every secret out of argv and
-output. Out of scope: the reverse proxy and its access control, which stay the user's
-(deploy/README.md).
+8767), `DEPLOY_URL`, `DEPLOY_SYNC` and `DEPLOY_SYNC_URL` from `.env`, runs ssh in batch mode and
+keeps every secret out of argv and output. Out of scope: the reverse proxy and its access control,
+which stay the user's (deploy/README.md).
 
 ## Settings and access
 
@@ -13,6 +13,11 @@ output. Out of scope: the reverse proxy and its access control, which stay the u
   (default 22): ask once, together with `DEPLOY_URL` (optional: the public URL behind the user's
   proxy), and write them into `.env` (rules in SKILL.md). After the first `S precheck`, write the
   absolute dir its `dir` line names into `DEPLOY_DIR`.
+- `DEPLOY_SYNC`: `ankiweb` (the default) or `self-hosted`, Anki's own sync server on the host
+  (deploy/README.md, "Sync server"). First deploy without it: ask once, together with `DEPLOY_SSH`
+  (AskUserQuestion: AnkiWeb, or self-hosted), and write it into `.env`. Unset on a rerun: the host
+  keeps its mode. `DEPLOY_SYNC_URL` (self-hosted only): the HTTPS URL the user's proxy gives the
+  sync server, ending in `/`; ask for it when the proxy is set up (see Switching to self-hosted).
 - `Permission denied (publickey)`: ssh needs a key or an agent; the user runs
   `ssh-copy-id -p <port> <host>` once (their password). `Host key verification failed`: ask, then
   run `ssh -o StrictHostKeyChecking=accept-new -p <port> <host> true`, which records the key the
@@ -42,16 +47,30 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
    means a rerun.
 3. Rerun only: `S status` and `S kit-diff`, before anything is uploaded; keep both results.
 4. `S upload`, then `S up` with Bash `run_in_background` (the first build downloads about 200 MB).
-   Its output ends with `decks: N`, plus a hint line when N is 0 or 1.
-5. AnkiWeb login, only when N is 0 or 1 (an empty profile):
-   - `S tunnel` with `run_in_background` (keep its task id), `S vnc-password` (into the clipboard,
-     never shown), `open vnc://127.0.0.1:5901` (Linux: a VNC viewer on `127.0.0.1:5901`).
-   - Tell the user: "Paste the password (Cmd+V) into Screen Sharing. In Anki click Sync, log in to
-     AnkiWeb, and when it asks, choose **Download from AnkiWeb**. Never Upload: that would replace
-     your AnkiWeb collection with this empty one. I watch for the decks."
-   - `S wait-decks N` with `run_in_background`, end the turn. When it prints the new count:
-     `S clip-clear`, stop the tunnel task (TaskStop), tell the user the media keeps syncing on the
-     server and the Screen Sharing window can close. Timeout: ask what Anki shows.
+   Its output ends with `decks: N`, plus a hint line when N is 0 or 1. The line before it is
+   `sync: AnkiWeb` or `sync: self-hosted on 127.0.0.1:8766, ...`.
+5. Sync login, only when N is 0 or 1 (an empty profile):
+   - AnkiWeb (`DEPLOY_SYNC` unset or `ankiweb`):
+     - `S tunnel` with `run_in_background` (keep its task id), `S vnc-password` (into the clipboard,
+       never shown), `open vnc://127.0.0.1:5901` (Linux: a VNC viewer on `127.0.0.1:5901`).
+     - Tell the user: "Paste the password (Cmd+V) into Screen Sharing. In Anki click Sync, log in to
+       AnkiWeb, and when it asks, choose **Download from AnkiWeb**. Never Upload: that would replace
+       your AnkiWeb collection with this empty one. I watch for the decks."
+     - `S wait-decks N` with `run_in_background`, end the turn. When it prints the new count:
+       `S clip-clear`, stop the tunnel task (TaskStop), tell the user the media keeps syncing on the
+       server and the Screen Sharing window can close. Timeout: ask what Anki shows.
+   - Self-hosted:
+     - `S status` shows `no collection yet` on its `sync:` line: the collection has to reach the server
+       first, from a device that has it: steps 1 to 5 of Switching to self-hosted, then come back here.
+       A user starting with no cards at all skips that.
+     - `S tunnel` with `run_in_background` (keep its task id), `S vnc-password`,
+       `open vnc://127.0.0.1:5901`. Tell the user: "Paste the password (Cmd+V) into Screen Sharing. In
+       Anki: Tools, Preferences, Syncing: Log Out if it shows an account, set Self-hosted sync server to
+       `http://sync:8766/`, close Preferences and click Sync. Tell me when the login form shows."
+     - Then `S sync-password` and tell the user: "Log in as `anki` with the password (Cmd+V). Choose
+       **Download**: the server has your collection. I watch for the decks."
+     - `S wait-decks N` with `run_in_background`, end the turn. When it prints the new count:
+       `S clip-clear`, stop the tunnel task (TaskStop). Timeout: ask what Anki shows.
 6. Knowledge decks: `S deck-names` lists the server collection's top-level decks with the kind
    `KNOWLEDGE_DECKS` from `.env` gives them. First deploy, or a `missing` line: ask as in SKILL.md
    step 3 and set `KNOWLEDGE_DECKS` in `.env`. Note whether it changed in this run.
@@ -87,9 +106,11 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
      app tunnel task (TaskStop). Timeout: ask what the page shows.
 9. `S status`: expect `service: active`, `owner: unlocked`, `api stage: idle`, `decks:` (a number),
    `binary: matches`, `polkit rule: installed for <user>` (skipped: updates will need sudo; tell the
-   user why). `DEPLOY_URL` set: `S verify-url` (a 401, 403 or a login page is the proxy's access
-   control: fine, the user checks in a browser). Unset: the service listens on the host's
-   `127.0.0.1:<DEPLOY_PORT>` (8767 by default); the app tunnel of step 8 reaches it from here.
+   user why), `sync:` matching `DEPLOY_SYNC` (self-hosted: `running on 127.0.0.1:8766, collection
+   ...`). `DEPLOY_URL` set: `S verify-url` (a 401, 403 or a login page is the proxy's access control:
+   fine, the user checks in a browser; it also checks `DEPLOY_SYNC_URL` when set: `health: 200`).
+   Unset: the service listens on the host's `127.0.0.1:<DEPLOY_PORT>` (8767 by default); the app
+   tunnel of step 8 reaches it from here.
 
 ## Mode `server-update`
 
@@ -99,7 +120,9 @@ No human step when the host has the polkit rule (install.sh from this kit, polki
    `DEPLOY_DIR`: mode `server`).
 2. `S kit-diff`: only `anki/` files differ: `S upload` and `S up` (no sudo). `install.sh`,
    `smoke.sh` or the unit differ: mode `server` (one sudo password).
-3. `S status`: a pass in progress (see Pass in progress) is asked about first.
+3. `S status`: a pass in progress (see Pass in progress) is asked about first. A `sync:` line that
+   differs from `DEPLOY_SYNC` (`sync: AnkiWeb` with `DEPLOY_SYNC=self-hosted`): Switching to
+   self-hosted, not a plain update.
 4. `S upload-bin`, then `S restart`. Refused (an older deploy without the rule, or no polkit): `S
    sudo-restart` opens a window for the sudo password, `S wait-install <file>` in the background;
    afterwards suggest mode `server` once, which adds the rule (no polkit: `apt install polkitd` on
@@ -113,6 +136,46 @@ No human step when the host has the polkit rule (install.sh from this kit, polki
    - When it prints `owner: unlocked`: stop the app tunnel task (TaskStop), then `S status`
      (`binary: matches`, `service: active`, `owner: unlocked`, `api stage: idle`), and `S verify-url`
      when `DEPLOY_URL` is set.
+
+## Switching to self-hosted
+
+An existing deploy on AnkiWeb, `DEPLOY_SYNC=self-hosted` in `.env`. The cards keep their state: the
+first sync with the empty server uploads the whole collection (schedules, review history, FSRS
+state, deck options, media).
+
+1. Tell the user: "Sync every device with AnkiWeb now (computer, phones; the server's Anki syncs on
+   every pass), then review nowhere until I say so. On your computer, export a backup: File, Export,
+   Anki Collection Package, with media and scheduling." Wait for their yes.
+2. `S status`: a pass in progress is asked about first (see Pass in progress). `S upload`, then
+   `S up` with `run_in_background`: its `sync:` line says `self-hosted on 127.0.0.1:8766`.
+3. The proxy is the user's. Tell them what it needs: an HTTPS URL forwarding to `127.0.0.1:8766` on
+   the host (its own name, or a path such as `/sync/` on an existing one, which then forwards to
+   `http://127.0.0.1:8766/` with the path stripped); no login of the proxy in front (Anki can't pass
+   one, the sync login guards the server); TLS 1.2 enabled (AnkiMobile fails with error -9836
+   without it); a request body limit above the collection size (nginx: `client_max_body_size`, 1 MB
+   by default; the server takes 100 MB by default); with Caddy, `read_buffer 512k` in the
+   `reverse_proxy` transport. Ask for the URL, write `DEPLOY_SYNC_URL` (ending in `/`) into `.env`,
+   run `S verify-url`: expect `health: 200`.
+4. `S sync-password` (clipboard), then tell the user: "In Anki on your computer: Tools, Preferences,
+   Syncing: Log Out, set Self-hosted sync server to <DEPLOY_SYNC_URL>, close Preferences, click
+   Sync and log in as `anki` with the password (Cmd+V). The server is empty, so Anki uploads your
+   collection. Tell me when the media has finished (the sync button stops spinning)."
+5. `S clip-clear`, `S status`: the `sync:` line shows `collection X MB, N media files`. N should match
+   the number of files in the computer's `collection.media` folder
+   (`ls <Anki2>/<profile>/collection.media | wc -l`, read-only); ask the user to sync once more when
+   it is lower.
+6. The server's Anki: mode `server` step 5, Self-hosted (VNC, `http://sync:8766/`, **Download**),
+   even though its profile is not empty: it still points at AnkiWeb. The deck count does not change
+   here, so instead of `S wait-decks` ask the user to tell you when the download has finished; then
+   `S clip-clear`, stop the tunnel task (TaskStop), and `S decks` shows the same count as before.
+7. Tell the user to switch the other devices: Log Out of AnkiWeb, set the custom sync server to
+   <DEPLOY_SYNC_URL> (AnkiDroid 2.16 or newer: Settings, Sync, Custom sync server; AnkiMobile: the
+   custom sync server in its sync settings), log in as `anki`, choose **Download**. Reviews can
+   resume. AnkiWeb keeps its last copy until they delete the account there.
+
+Back to AnkiWeb: `DEPLOY_SYNC=ankiweb`, `S up` (stops `anki-sync`, its volume stays), then every
+device clears the self-hosted URL and logs in to AnkiWeb; the device with the latest reviews uploads,
+the others download.
 
 ## Mode `check`, server part
 

@@ -33,5 +33,8 @@ What the server is built to withstand, so a report can be checked against it:
 - Out of scope: root or the service user on the machine that runs the server (they can read the
   server's memory while it is unlocked), and the copy of the AnkiConnect key the deploy kit keeps for
   the Anki container.
+- The deploy kit's self-hosted mode runs Anki's own sync server on 127.0.0.1. Devices reach it through
+  the owner's HTTPS proxy, and its login (a random password in the deploy dir, 0600) is its only access
+  control: whoever has the password can read or replace the collection.
 - No secrets live in this repository. The tokens and the owner's password are typed into the page and
   stay on the machine that runs the server.

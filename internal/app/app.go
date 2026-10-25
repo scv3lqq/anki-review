@@ -27,7 +27,7 @@ import (
 const (
 	readHeaderTimeout = 10 * time.Second
 	readTimeout       = 30 * time.Second
-	// a start syncs with AnkiWeb and reads every new card of the deck: allow it a while
+	// a start syncs Anki with its sync server and reads every new card of the deck: allow it a while
 	writeTimeout    = 3 * time.Minute
 	idleTimeout     = 2 * time.Minute
 	shutdownTimeout = 30 * time.Second

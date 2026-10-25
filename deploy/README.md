@@ -2,15 +2,17 @@
 
 Runs anki-review on a Linux server. Anki desktop with AnkiConnect runs headless in Docker. The server
 runs as a hardened systemd service under its own system user, with its own Claude Code install.
+Anki syncs through AnkiWeb, or through Anki's own sync server in a second container
+([Sync server](#sync-server-ankiweb-or-self-hosted)).
 
-With Claude Code, `/setup-anki-review server` runs every step below from your machine; you type the
-AnkiWeb password in the VNC window, the sudo password and the setup form on the server's page (owner
-login, password, Claude token, AnkiConnect key). `/setup-anki-review server-update` ships a new build
-without any of them.
+With Claude Code, `/setup-anki-review server` runs every step below from your machine; you log in to
+the sync server in the VNC window and type the sudo password and the setup form on the server's page
+(owner login, password, Claude token, AnkiConnect key). `/setup-anki-review server-update` ships a
+new build without any of them.
 
 | Path | What |
 | --- | --- |
-| `anki/` | Anki image: `Dockerfile`, `compose.yaml`, `entrypoint.sh`, `setup-profile.py`. `up.sh` creates the secrets and starts it |
+| `anki/` | Anki image: `Dockerfile`, `compose.yaml`, `entrypoint.sh`, `setup-profile.py`, `syncserver.sh`. `up.sh` creates the secrets and starts it, `up.sh self-hosted` with the sync server |
 | `install.sh` | root: service user, Claude Code, `/etc/anki-review/env`, the unit, a polkit rule for restarts, smoke test, start |
 | `smoke.sh` | root: `claude --version` as the service user, in the service's sandbox |
 | `systemd/anki-review.service` | unit template, `@DEPLOY_DIR@` is filled in by `install.sh` |
@@ -19,8 +21,8 @@ without any of them.
 
 - On the server: Linux x86_64 with systemd, Docker Engine with the compose plugin, curl. A deploy
   user in the `docker` group with sudo. Outbound HTTPS to GitHub, git.sr.ht, the Debian mirrors,
-  claude.ai, AnkiWeb and the Anthropic API. Optional: polkit 0.106 or newer, for updates without
-  sudo.
+  claude.ai, the Anthropic API and AnkiWeb (AnkiWeb mode only). Optional: polkit 0.106 or newer, for
+  updates without sudo.
 - On your machine: Go, SSH access as the deploy user, and Claude Code logged in to your account (for
   `claude setup-token`, see step 6).
 
@@ -35,14 +37,19 @@ shell expands `~` before ssh sends the command.
    `SSH 'mkdir -p DIR/bin && chmod 700 DIR'`,
    `scp -r deploy/anki deploy/systemd deploy/install.sh deploy/smoke.sh <user>@<server>:DIR/`,
    `scp bin/anki-review-linux-amd64 <user>@<server>:DIR/bin/anki-review`.
-3. Start Anki as the deploy user, no sudo: `SSH DIR/anki/up.sh`. It creates the AnkiConnect key and
-   the VNC password in `DIR/anki/secrets/` (0600, never printed), builds the image (the first build
+3. Start Anki as the deploy user, no sudo: `SSH DIR/anki/up.sh` (AnkiWeb) or
+   `SSH DIR/anki/up.sh self-hosted`. It creates the AnkiConnect key, the VNC password and the sync
+   server password in `DIR/anki/secrets/` (0600, never printed), builds the image (the first build
    downloads about 200 MB), waits for AnkiConnect and prints the deck count.
-4. **Human:** log in to AnkiWeb once. Open a tunnel with `ssh -p <port> -N -L 5901:127.0.0.1:5900
+4. **Human:** log in to the sync server once. Open a tunnel with `ssh -p <port> -N -L 5901:127.0.0.1:5900
    <user>@<server>`. Read the password with `SSH cat DIR/anki/secrets/vnc-password` (append `| pbcopy`
    on macOS). Connect a VNC viewer to `127.0.0.1:5901` (`open vnc://127.0.0.1:5901` on macOS: Screen
-   Sharing refuses local port 5900). In Anki, press Sync, log in, choose "Download from AnkiWeb" and
-   wait for the media. A rerun of `up.sh` then shows more than one deck.
+   Sharing refuses local port 5900). AnkiWeb: in Anki, press Sync, log in, choose "Download from
+   AnkiWeb" and wait for the media. Self-hosted: first bring the collection to the server
+   ([Moving from AnkiWeb](#moving-from-ankiweb), steps 1 to 4), then in Preferences, Syncing set the
+   self-hosted sync server to `http://sync:8766/`, press Sync, log in as `anki` with
+   `SSH cat DIR/anki/secrets/sync-password` and choose **Download**. A rerun of `up.sh` then shows
+   more than one deck.
 5. **Human, sudo password:** `ssh -t -p <port> <user>@<server> sudo DIR/install.sh DIR`. The
    script installs the service user, Claude Code and the polkit rule (below), writes
    `/etc/anki-review/env` (root:anki-review 0640) without any token, leaves `DIR/install-state` (no
@@ -67,6 +74,55 @@ control is optional now that the page has a login). It must send `Host: 127.0.0.
 send `X-Forwarded-Proto` (the session cookie is `Secure` only then) and `X-Forwarded-For` (login
 throttling counts per client by its last hop).
 
+## Sync server: AnkiWeb or self-hosted
+
+Anki here syncs with AnkiWeb, or with Anki's own sync server on the same host (`up.sh self-hosted`).
+`up.sh` keeps the mode in `DIR/anki/sync-mode`: a run without an argument keeps the last one,
+AnkiWeb on a new host.
+
+- The server is the one built into Anki (`anki --syncserver`), from the same image, in the container
+  `anki-sync`. It listens on `127.0.0.1:8766` (`SYNC_PORT` for `up.sh`) and keeps its copy of the
+  collection and the media in the volume `anki-sync`.
+- One login, `anki`. The password is in `DIR/anki/secrets/sync-password` (24 random letters and
+  digits, created by `up.sh`). To change it, write a new one of the same kind into the file, run
+  `docker restart anki-sync` (the server reads it only at start) and log in again on every device.
+- Anki here reaches it as `http://sync:8766/`. Your devices need HTTPS: a reverse proxy name for
+  `http://127.0.0.1:8766` on the host, with no proxy login in front (Anki can't pass one; the sync
+  login guards the server). AnkiMobile needs TLS 1.2 enabled on the proxy (error -9836 otherwise).
+  The proxy's body limit must exceed the collection (nginx: `client_max_body_size`, 1 MB by
+  default); the server takes up to 100 MB, more with `SYNC_MAX_PAYLOAD_MEGS` for `up.sh`. Caddy
+  needs `read_buffer 512k` in its `reverse_proxy` transport, or media downloads break.
+- On each device the URL goes in with its trailing `/`: Anki desktop, Preferences, Syncing,
+  Self-hosted sync server; AnkiDroid 2.16 or newer, Settings, Sync, Custom sync server; AnkiMobile,
+  the custom sync server in its sync settings. Then log in as `anki`.
+
+### Moving from AnkiWeb
+
+The first sync with an empty server uploads the whole collection file: schedules, review history,
+FSRS parameters and memory state, deck options, suspended and buried cards, flags, tags, then the
+media. Nothing is converted, so every card keeps its state.
+
+1. Sync every device with AnkiWeb once more, then review nowhere until step 5.
+2. On your main computer, export a backup: File, Export, Anki Collection Package, with media and
+   scheduling.
+3. `SSH DIR/anki/up.sh self-hosted`, then set up the proxy. `curl https://sync.example.com/health`
+   answers 200 with an empty body.
+4. Main computer: Preferences, Syncing: Log Out, set the self-hosted sync server, close Preferences,
+   press Sync, log in as `anki`. The server is empty, so Anki uploads the collection. Wait for the
+   media to finish.
+5. Anki here (VNC, as in step 4 above), then your other devices: Log Out, set the URL
+   (`http://sync:8766/` here), Sync, log in, choose **Download**.
+
+AnkiWeb keeps its last copy until you delete the account there.
+
+Back to AnkiWeb: `SSH DIR/anki/up.sh ankiweb` stops `anki-sync` (its volume stays). On every device,
+clear the self-hosted URL and log in to AnkiWeb; upload from the device with the latest reviews and
+download on the others.
+
+Backups: every Anki desktop keeps automatic backups of its profile, and any device can rebuild the
+server's copy with a full upload. A copy of the server's data, from `DIR`:
+`docker stop anki-sync && docker run --rm --user "$(id -u):$(id -g)" -v anki-sync:/sync:ro -v "$PWD":/out debian:trixie-slim tar -C /sync -czf /out/anki-sync.tgz . ; docker start anki-sync`.
+
 ## Settings and updates
 
 - The binary: copy a new build to `DIR/bin/anki-review`, then `systemctl restart anki-review`, no
@@ -86,8 +142,8 @@ throttling counts per client by its last hop).
   `install.sh`, which removes those two lines and says so, then set up on the page (step 6). A
   leftover `DIR/claude-token` from the old upload step is shredded by the same run.
 - Anki or AnkiConnect: change the version, commit and sha256 arguments in `anki/Dockerfile`, then
-  rerun `up.sh`. Host ports: `ANKI_CONNECT_PORT` (8765) and `VNC_PORT` (5900) for `up.sh`; pass the
-  same `ANKI_CONNECT_PORT` to `install.sh`.
+  rerun `up.sh`. Host ports: `ANKI_CONNECT_PORT` (8765), `VNC_PORT` (5900) and `SYNC_PORT` (8766) for
+  `up.sh`; pass the same `ANKI_CONNECT_PORT` to `install.sh`.
 
 ## What protects what
 
@@ -95,6 +151,11 @@ throttling counts per client by its last hop).
   bind is the protection. AnkiConnect needs its apiKey and VNC needs a password, which keeps out
   other local users and containers. The AnkiConnect key also sits in `DIR/anki/secrets/` (0600), where
   the Anki container reads it.
+- The sync server (self-hosted mode) is published on 127.0.0.1 only, with the same container
+  hardening and a 512 MB memory limit; TLS comes from your proxy. Its login is its only access
+  control: whoever has the password can read or replace the collection. The password is 24 random
+  letters and digits (about 143 bits), in `DIR/anki/secrets/sync-password` (0600) and in the
+  server container's environment.
 - The Anki container runs as a non-root user with a read-only root filesystem, no capabilities,
   `no-new-privileges` and a 1 GB memory limit. The base image is pinned by digest, and the Anki and
   AnkiConnect downloads by sha256.
