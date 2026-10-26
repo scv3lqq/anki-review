@@ -180,7 +180,8 @@ Turn it on:
 - `sudo env AUTO_DEPLOY=on DIR/install.sh DIR`. `AUTO_DEPLOY=off` removes the units; a run without it
   keeps them.
 
-Follow it: `journalctl -u anki-review-deploy`, which says once per commit why it waits.
+Follow it: `sudo journalctl -u anki-review-deploy` (sudo unless the deploy user is in `adm` or
+`systemd-journal`), which says once per commit why it waits.
 `DIR/autodeploy-state` holds the last deployed, held and rejected commit. A fork sets
 `AUTO_DEPLOY_REPO` (and `AUTO_DEPLOY_BRANCH`) with `systemctl edit anki-review-deploy.service`.
 

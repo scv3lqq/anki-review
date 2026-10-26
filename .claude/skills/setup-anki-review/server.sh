@@ -607,7 +607,7 @@ else:
         print("auto-deploy: holding %s: %s" % (held[0][:12], held[1]))
     bad = v.get("deploy_rejected", "").strip()
     if bad and bad != done:
-        print("auto-deploy: rejected", bad[:12], "(journalctl -u anki-review-deploy)")
+        print("auto-deploy: rejected", bad[:12], "(sudo journalctl -u anki-review-deploy)")
 want, got = os.environ.get("WANT"), v.get("bin", "")
 if not got:
     print("binary: not installed")
