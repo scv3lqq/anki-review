@@ -106,7 +106,8 @@ logged in, **Settings** changes the password or either token; an empty field kee
 [deploy/README.md](deploy/README.md) runs it on a Linux server: Anki headless in Docker, the app as a
 hardened systemd service behind your own reverse proxy. With Claude Code, `/setup-anki-review server`
 does the whole deploy over ssh; you log in to the sync server in the VNC window and type the sudo
-password and the setup form on the page. `/setup-anki-review server-update` ships a new build.
+password and the setup form on the page. `/setup-anki-review server-update` ships a new build, or
+the server pulls and ships each signed commit of `main` itself ([auto-deploy](deploy/README.md#auto-deploy)).
 Anki there syncs through AnkiWeb or through Anki's own sync server on the same host
 ([self-hosted](deploy/README.md#sync-server-ankiweb-or-self-hosted)).
 

@@ -12,7 +12,9 @@
 #   only its presence is checked here, the Anki container reads it).
 # Settings, through `sudo env NAME=value ... install.sh`: PORT, KNOWLEDGE_DECKS, ANKI_CONNECT_URL
 # (or ANKI_CONNECT_PORT), ANKI_SYNC, CLAUDE_MODEL, GRADE_TIMEOUT, LOG_LEVEL go into the env file;
-# CLAUDE_VERSION=x.y.z|stable|latest overrides the pinned Claude Code version.
+# CLAUDE_VERSION=x.y.z|stable|latest overrides the pinned Claude Code version. AUTO_DEPLOY=on installs
+# anki-review-deploy.timer (autodeploy.sh, it needs DEPLOY_DIR/allowed_signers, git, jq and go),
+# AUTO_DEPLOY=off removes it, unset keeps it as it is.
 set -euo pipefail
 
 fail() { echo "install.sh: $*" >&2; exit 1; }
@@ -46,6 +48,12 @@ polkit_rule=/etc/polkit-1/rules.d/50-anki-review.rules
 claude_version="${CLAUDE_VERSION:-2.1.310}"
 claude_bin="$home/.local/bin/claude"
 settings=(PORT KNOWLEDGE_DECKS ANKI_CONNECT_URL ANKI_SYNC CLAUDE_MODEL GRADE_TIMEOUT LOG_LEVEL)
+auto_deploy="${AUTO_DEPLOY:-}"
+deploy_svc=anki-review-deploy
+deploy_script="$deploy_dir/autodeploy.sh"
+deploy_signers="$deploy_dir/allowed_signers"
+deploy_unit_dst="/etc/systemd/system/$deploy_svc.service"
+deploy_timer_dst="/etc/systemd/system/$deploy_svc.timer"
 
 for f in "$bin_src" "$unit_src" "$smoke"; do
   [[ -f $f ]] || fail "missing $f"
@@ -54,6 +62,10 @@ done
 [[ $claude_version =~ ^(stable|latest|[0-9]+\.[0-9]+\.[0-9]+)$ ]] || fail "bad CLAUDE_VERSION: $claude_version"
 if [[ -n ${PORT:-} && ! $PORT =~ ^[0-9]+$ ]]; then
   fail "bad PORT: $PORT"
+fi
+[[ -z $auto_deploy || $auto_deploy == on || $auto_deploy == off ]] || fail "AUTO_DEPLOY must be on or off: $auto_deploy"
+if [[ -z $auto_deploy && -f $deploy_unit_dst ]]; then
+  auto_deploy=keep
 fi
 if [[ -n ${ANKI_CONNECT_PORT:-} && -z ${ANKI_CONNECT_URL:-} ]]; then
   [[ $ANKI_CONNECT_PORT =~ ^[0-9]+$ ]] || fail "bad ANKI_CONNECT_PORT: $ANKI_CONNECT_PORT"
@@ -118,6 +130,20 @@ drop_secret_lines() {
   mv -f "$tmp" "$env_file"
   echo "removed the Claude token and the AnkiConnect key from the env file: enter them on the setup page"
 }
+
+# Before any change: everything autodeploy.sh needs on the host.
+if [[ $auto_deploy == on || $auto_deploy == keep ]]; then
+  for f in "$deploy_script" "$deploy_dir/systemd/$deploy_svc.service" "$deploy_dir/systemd/$deploy_svc.timer"; do
+    [[ -f $f ]] || fail "missing $f"
+  done
+  check_upload "$deploy_signers"
+  [[ -s $deploy_signers ]] || fail "$deploy_signers is empty: it lists the keys whose signed commits may deploy"
+  for c in git jq go ssh-keygen; do
+    command -v "$c" >/dev/null 2>&1 || fail "auto-deploy needs $c on the host"
+  done
+  # The name lands verbatim in the unit file.
+  [[ $deploy_user =~ ^[a-z_][a-z0-9_-]*$ ]] || fail "the user name $deploy_user does not fit a unit file safely"
+fi
 
 echo "== user $svc"
 if ! id -u "$svc" >/dev/null 2>&1; then
@@ -236,6 +262,39 @@ EOF
 fi
 echo "$polkit_state"
 
+echo "== auto-deploy $deploy_svc.timer"
+case $auto_deploy in
+on | keep)
+  # autodeploy.sh restarts the service as the deploy user, through the rule above.
+  [[ $polkit_state == installed* && $manager == "$deploy_user" ]] ||
+    fail "auto-deploy needs the polkit rule for $deploy_user (owner of $deploy_dir): $polkit_state"
+  for f in service timer; do
+    unit="$(<"$deploy_dir/systemd/$deploy_svc.$f")"
+    unit="${unit//@DEPLOY_DIR@/"$deploy_dir"}"
+    unit="${unit//@DEPLOY_USER@/"$deploy_user"}"
+    tmp="$(mktemp /etc/systemd/system/.anki-review.XXXXXX)"
+    printf '%s\n' "${unit//@PORT@/"$port"}" >"$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "/etc/systemd/system/$deploy_svc.$f"
+  done
+  systemctl daemon-reload
+  systemd-analyze verify "$deploy_unit_dst" "$deploy_timer_dst" ||
+    echo "install.sh: systemd-analyze reported the issues above" >&2
+  [[ $auto_deploy == keep ]] || systemctl enable --now --quiet "$deploy_svc.timer"
+  auto_deploy_state="timer $(systemctl is-enabled "$deploy_svc.timer" 2>/dev/null || true), deploys as $deploy_user"
+  ;;
+off)
+  if [[ -f $deploy_timer_dst ]]; then
+    systemctl disable --now --quiet "$deploy_svc.timer" || true
+  fi
+  rm -f "$deploy_unit_dst" "$deploy_timer_dst"
+  systemctl daemon-reload
+  auto_deploy_state="off"
+  ;;
+*) auto_deploy_state="off" ;;
+esac
+echo "$auto_deploy_state"
+
 # The old upload flow may have left a token here: shredded, the owner enters it on the setup page.
 echo "== leftover Claude token upload"
 if [[ -e $token_file || -L $token_file ]]; then
@@ -251,7 +310,7 @@ fi
 # Progress the deploy user can read (the env file is root:anki-review 0640). No secrets in it.
 # mktemp + mv: a link planted in the deploy dir gets replaced, never written through.
 tmp="$(mktemp "$deploy_dir/.install-state.XXXXXX")"
-printf '# written by install.sh, no secrets\nkit=2\npolkit=%s\n' "$polkit_state" >"$tmp"
+printf '# written by install.sh, no secrets\nkit=2\npolkit=%s\nautodeploy=%s\n' "$polkit_state" "$auto_deploy_state" >"$tmp"
 chmod 0644 "$tmp"
 mv -f "$tmp" "$deploy_dir/install-state"
 

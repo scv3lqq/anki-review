@@ -1,0 +1,41 @@
+# Installed by install.sh with AUTO_DEPLOY=on, which fills in the deploy dir, the deploy user and the
+# service port. Started by anki-review-deploy.timer.
+[Unit]
+Description=anki-review: deploy the signed head of main
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@DEPLOY_USER@
+Environment=ANKI_REVIEW_PORT=@PORT@
+ExecStart=@DEPLOY_DIR@/autodeploy.sh @DEPLOY_DIR@
+# The first run downloads the Go toolchain go.mod asks for.
+TimeoutStartSec=20min
+Nice=10
+UMask=0077
+
+# The deploy dir is the only path it sees in /home and the only one it writes: the clone, the Go
+# caches, bin/ and the state file. The restart goes through D-Bus and the polkit rule.
+ProtectHome=tmpfs
+BindPaths=@DEPLOY_DIR@
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateDevices=yes
+# The deploy user is in the docker group: the socket would make it root.
+InaccessiblePaths=-/run/docker.sock -/run/containerd
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=

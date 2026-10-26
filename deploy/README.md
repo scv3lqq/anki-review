@@ -8,14 +8,16 @@ Anki syncs through AnkiWeb, or through Anki's own sync server in a second contai
 With Claude Code, `/setup-anki-review server` runs every step below from your machine; you log in to
 the sync server in the VNC window and type the sudo password and the setup form on the server's page
 (owner login, password, Claude token, AnkiConnect key). `/setup-anki-review server-update` ships a
-new build without any of them.
+new build without any of them, and [Auto-deploy](#auto-deploy) lets the server ship `main` itself.
 
 | Path | What |
 | --- | --- |
 | `anki/` | Anki image: `Dockerfile`, `compose.yaml`, `entrypoint.sh`, `setup-profile.py`, `syncserver.sh`. `up.sh` creates the secrets and starts it, `up.sh self-hosted` with the sync server |
 | `install.sh` | root: service user, Claude Code, `/etc/anki-review/env`, the unit, a polkit rule for restarts, smoke test, start |
 | `smoke.sh` | root: `claude --version` as the service user, in the service's sandbox |
+| `autodeploy.sh` | deploy user, from the timer: ships the signed head of `main` ([Auto-deploy](#auto-deploy)) |
 | `systemd/anki-review.service` | unit template, `@DEPLOY_DIR@` is filled in by `install.sh` |
+| `systemd/anki-review-deploy.{service,timer}` | auto-deploy units, installed by `install.sh` with `AUTO_DEPLOY=on` |
 
 ## Prerequisites
 
@@ -145,6 +147,46 @@ server's copy with a full upload. A copy of the server's data, from `DIR`:
   rerun `up.sh`. Host ports: `ANKI_CONNECT_PORT` (8765), `VNC_PORT` (5900) and `SYNC_PORT` (8766) for
   `up.sh`; pass the same `ANKI_CONNECT_PORT` to `install.sh`.
 
+## Auto-deploy
+
+Optional: the server pulls `main` and ships it, so a push needs no step on your machine. Nothing
+reaches into the server and GitHub holds no credential of it: every 5 minutes
+`anki-review-deploy.timer` runs `DIR/autodeploy.sh` as the deploy user, which
+
+1. fetches `main` over HTTPS from the public repo (no token) into `DIR/src`; an unchanged head ends
+   the run;
+2. checks the head commit's SSH signature against `DIR/allowed_signers`: a commit no key there signed
+   never deploys. A head that does not descend from the deployed commit (a force push) waits until
+   you delete the `deployed=` line in `DIR/autodeploy-state`;
+3. waits for the CI checks `test` and `secrets` to pass on that commit (the public GitHub API, no
+   token);
+4. holds while `deploy/` in the commit differs from the kit in `DIR` (`install.sh`, the units,
+   `anki/`): those changes need root or a new Anki image, so they still go through the full setup;
+5. builds the binary with the flags of `make build-linux`; the same bytes as the running binary are
+   recorded without a restart, so commits outside the Go code (docs, the skill) restart nothing;
+6. holds while a pass is in progress (an unlocked server at a stage other than `idle` or `written`);
+7. stages the binary, restarts the service through the polkit rule and waits for `/api/session`. No
+   answer in 30 s: the previous binary goes back and the commit is skipped.
+
+Each deploy locks the service until you log in on the page, like any restart.
+
+Turn it on:
+
+- On the server: git, jq, Go 1.21 or newer (it downloads the version `go.mod` asks for) and the
+  polkit rule (polkit 0.106 or newer). Your commits on `main` are SSH-signed.
+- `DIR/allowed_signers`, one line per key whose commits may deploy, in the format of
+  `ssh-keygen -Y verify` (`you@example.com namespaces="git" ssh-ed25519 AAAA...`).
+  `/setup-anki-review` writes it from your git signing key (`server.sh signers`).
+- `sudo env AUTO_DEPLOY=on DIR/install.sh DIR`. `AUTO_DEPLOY=off` removes the units; a run without it
+  keeps them.
+
+Follow it: `journalctl -u anki-review-deploy`, which says once per commit why it waits.
+`DIR/autodeploy-state` holds the last deployed, held and rejected commit. A fork sets
+`AUTO_DEPLOY_REPO` (and `AUTO_DEPLOY_BRANCH`) with `systemctl edit anki-review-deploy.service`.
+
+Commits that GitHub signs, such as a merge in the web UI, carry GitHub's key, not yours: they wait for
+your next signed commit on top.
+
 ## What protects what
 
 - AnkiConnect and VNC are published on 127.0.0.1 only: Docker's port publishing bypasses ufw, so the
@@ -161,6 +203,12 @@ server's copy with a full upload. A copy of the server's data, from `DIR`:
   AnkiConnect downloads by sha256.
 - The polkit rule grants one user three verbs on one unit: no other unit, no enable, disable or
   edit. The deploy user already owns `DIR`, whose binary the unit runs, and has sudo.
+- Auto-deploy trusts the keys in `DIR/allowed_signers`, not GitHub: the signature covers the tree it
+  builds, so neither a takeover of the GitHub account nor of the repo ships code without your key,
+  and a force push back to an older signed commit waits for you. The CI check only keeps red builds
+  out. Its unit sees no other path in `/home` than `DIR`, writes
+  only there, has no Docker socket (the deploy user's docker group would make it root) and can't gain
+  privileges, so no sudo.
 - The service runs as `anki-review` under a hardened unit: `ProtectSystem=strict`, `ProtectHome`, no
   capabilities, private `/tmp` and devices. Its only writable path is `/var/lib/anki-review`.
 - The Claude token and the AnkiConnect key are sealed in `/var/lib/anki-review/data/vault.json` (0600),

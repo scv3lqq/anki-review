@@ -18,6 +18,9 @@ which stay the user's (deploy/README.md).
   (AskUserQuestion: AnkiWeb, or self-hosted), and write it into `.env`. Unset on a rerun: the host
   keeps its mode. `DEPLOY_SYNC_URL` (self-hosted only): the HTTPS URL the user's proxy gives the
   sync server, ending in `/`; ask for it when the proxy is set up (see Switching to self-hosted).
+- `DEPLOY_AUTO`: `on` or `off`, the host pulls and ships signed commits of `main` itself
+  (deploy/README.md, "Auto-deploy"). Unset: the host keeps what it has. Ask only when the user asks
+  for auto-deploy or CD; `on` needs SSH-signed commits (`git config gpg.format` is `ssh`).
 - `Permission denied (publickey)`: ssh needs a key or an agent; the user runs
   `ssh-copy-id -p <port> <host>` once (their password). `Host key verification failed`: ask, then
   run `ssh -o StrictHostKeyChecking=accept-new -p <port> <host> true`, which records the key the
@@ -78,8 +81,11 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
    `KNOWLEDGE_DECKS` from `.env` gives them. First deploy, or a `missing` line: ask as in SKILL.md
    step 3 and set `KNOWLEDGE_DECKS` in `.env`. Note whether it changed in this run.
 7. `install.sh`. Skip when step 3 showed `service: active`, a `polkit rule:` that is installed (or
-   skipped for missing or old polkit, which a rerun won't change), `kit-diff` matching, and
-   `KNOWLEDGE_DECKS` unchanged. Otherwise, with a pass in progress (see Pass in progress), ask first.
+   skipped for missing or old polkit, which a rerun won't change), `kit-diff` matching,
+   `KNOWLEDGE_DECKS` unchanged, and an `auto-deploy:` line that matches `DEPLOY_AUTO` (unset matches
+   anything). Otherwise, with a pass in progress (see Pass in progress), ask first. `DEPLOY_AUTO=on`:
+   `S signers` first (it writes `DIR/allowed_signers` from the signing key and checks it against
+   HEAD).
    `S install` opens a new window with
    `ssh -t ... sudo env KNOWLEDGE_DECKS=... DIR/install.sh DIR` (absolute paths, quoted for the
    host) and prints an exit file. Tell the user to type their sudo password there, run
@@ -110,7 +116,8 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
 9. `S status`: expect `service: active`, `owner: unlocked`, `api stage: idle`, `decks:` (a number),
    `binary: matches`, `polkit rule: installed for <user>` (skipped: updates will need sudo; tell the
    user why), `sync:` matching `DEPLOY_SYNC` (self-hosted: `running on 127.0.0.1:8766, collection
-   ...`). `DEPLOY_URL` set: `S verify-url` (a 401, 403 or a login page is the proxy's access control:
+   ...`), `auto-deploy: on, deployed ...` with `DEPLOY_AUTO=on` (the first run comes a minute
+   after the install). `DEPLOY_URL` set: `S verify-url` (a 401, 403 or a login page is the proxy's access control:
    fine, the user checks in a browser; it also checks `DEPLOY_SYNC_URL` when set: `health: 200`).
    Unset: the service listens on the host's `127.0.0.1:<DEPLOY_PORT>` (8767 by default); the app
    tunnel of step 8 reaches it from here.
@@ -118,6 +125,11 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
 ## Mode `server-update`
 
 No human step when the host has the polkit rule (install.sh from this kit, polkit 0.106+).
+
+`S status` shows `auto-deploy: on`: a signed commit pushed to `main` ships itself, so a commit plus
+`git push` is the update. This mode is then for a build that is not on `main`, or for what
+auto-deploy holds (`auto-deploy: holding ...`): a changed kit is mode `server`, a pass in progress
+waits on its own.
 
 1. `make check` (or `go test ./...`), `make build-linux`, `S precheck update` (no service from this
    `DEPLOY_DIR`: mode `server`).

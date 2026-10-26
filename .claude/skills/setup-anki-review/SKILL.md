@@ -10,7 +10,8 @@ allowed-tools: Read, Edit, Write, Bash(.claude/skills/setup-anki-review/check.sh
 Argument: $ARGUMENTS
 
 - `local` (also no argument): this machine, steps 1 to 6 below.
-- `server`, `server-update`: a Linux server, [references/server.md](references/server.md).
+- `server`, `server-update`: a Linux server, [references/server.md](references/server.md); also
+  turning auto-deploy of `main` on or off (`DEPLOY_AUTO`).
 - `check`: step 1, plus `server.sh status` and `server.sh kit-diff` when `DEPLOY_SSH` is set;
   then the report. Nothing changes.
 

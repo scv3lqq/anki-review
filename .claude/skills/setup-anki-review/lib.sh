@@ -36,7 +36,7 @@ load_dotenv() {
     case $name in
     PORT | DATA_DIR | KNOWLEDGE_DECKS | ANKI_CONNECT_URL | ANKI_CONNECT_KEY | ANKI_SYNC | CLAUDE_BIN | \
       CLAUDE_MODEL | GRADE_TIMEOUT | LOG_LEVEL | DEPLOY_SSH | DEPLOY_SSH_PORT | DEPLOY_DIR | DEPLOY_PORT | DEPLOY_URL | \
-      DEPLOY_SYNC | DEPLOY_SYNC_URL) ;;
+      DEPLOY_SYNC | DEPLOY_SYNC_URL | DEPLOY_AUTO) ;;
     *) continue ;;
     esac
     # make drops the blanks after = but keeps those before a # or the line end: the server gets

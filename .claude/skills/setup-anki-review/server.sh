@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Server steps of deploy/README.md for the setup skill, from DEPLOY_SSH, DEPLOY_SSH_PORT, DEPLOY_DIR,
-# DEPLOY_PORT (the service port, default 8767), DEPLOY_URL, DEPLOY_SYNC and DEPLOY_SYNC_URL in .env
+# DEPLOY_PORT (the service port, default 8767), DEPLOY_URL, DEPLOY_SYNC, DEPLOY_SYNC_URL and DEPLOY_AUTO in .env
 # (or the environment). Secrets (VNC password, AnkiConnect key, sync server password) travel only
 # through pipes and files: never argv, never this script's output. The Claude token and the owner's
 # password never reach this script: the owner types them into the setup page.
@@ -9,6 +9,7 @@
 #   server.sh upload             the kit and bin/anki-review-linux-amd64 into DEPLOY_DIR (0700)
 #   server.sh upload-bin         only the binary, swapped in atomically
 #   server.sh kit-diff           kit files that differ from the host's copy
+#   server.sh signers            DEPLOY_DIR/allowed_signers from this clone's SSH signing key (auto-deploy)
 #   server.sh up                 DEPLOY_DIR/anki/up.sh on the host (no sudo), in the DEPLOY_SYNC mode when set
 #   server.sh decks              deck count through the host's AnkiConnect
 #   server.sh deck-names         its top-level decks and their kind under KNOWLEDGE_DECKS
@@ -41,9 +42,10 @@ die() {
 
 svc="anki-review"
 bin_local=$root/bin/anki-review-linux-amd64
-kit_top="install.sh smoke.sh"
+kit_top="install.sh smoke.sh autodeploy.sh"
+kit_units="anki-review.service anki-review-deploy.service anki-review-deploy.timer"
 kit_anki="Dockerfile compose.yaml entrypoint.sh setup-profile.py syncserver.sh up.sh"
-kit_all="$kit_top systemd/anki-review.service anki/Dockerfile anki/compose.yaml anki/entrypoint.sh anki/setup-profile.py anki/syncserver.sh anki/up.sh"
+kit_all="$kit_top systemd/anki-review.service systemd/anki-review-deploy.service systemd/anki-review-deploy.timer anki/Dockerfile anki/compose.yaml anki/entrypoint.sh anki/setup-profile.py anki/syncserver.sh anki/up.sh"
 host=$(trim "${DEPLOY_SSH:-}")
 port=$(trim "${DEPLOY_SSH_PORT:-}")
 port=${port:-22}
@@ -232,18 +234,51 @@ cmd_upload_bin() {
 }
 
 cmd_upload() {
-  local f anki=()
+  local f top=() units=() anki=()
   need_bin
   resolve_dir
   for f in $kit_all; do [ -f "$root/deploy/$f" ] || die "missing deploy/$f"; done
+  for f in $kit_top; do top+=("$root/deploy/$f"); done
+  for f in $kit_units; do units+=("$root/deploy/systemd/$f"); done
   for f in $kit_anki; do anki+=("$root/deploy/anki/$f"); done
   rsh "mkdir -p $(q "$dir/bin") $(q "$dir/anki") $(q "$dir/systemd") && chmod 0700 $(q "$dir")"
-  # -p keeps the modes: install.sh, smoke.sh, up.sh and entrypoint.sh stay executable.
-  rcp "$root/deploy/install.sh" "$root/deploy/smoke.sh" "$host:$dir/"
-  rcp "$root/deploy/systemd/anki-review.service" "$host:$dir/systemd/"
+  # -p keeps the modes: install.sh, smoke.sh, autodeploy.sh, up.sh and entrypoint.sh stay executable.
+  rcp "${top[@]}" "$host:$dir/"
+  rcp "${units[@]}" "$host:$dir/systemd/"
   rcp "${anki[@]}" "$host:$dir/anki/"
   echo "kit uploaded to $dir"
   cmd_upload_bin
+}
+
+# The public half of the key this clone signs commits with, as DEPLOY_DIR/allowed_signers: the one
+# key whose commits autodeploy.sh ships. Checked against HEAD before it leaves this machine.
+cmd_signers() {
+  local key pub email line tmp rc=0
+  resolve_dir
+  [ "$(git -C "$root" config gpg.format || true)" = ssh ] || die "gpg.format is not ssh: auto-deploy checks SSH signatures"
+  key=$(git -C "$root" config user.signingkey || true)
+  [ -n "$key" ] || die "no user.signingkey in the git config"
+  case $key in
+  key::*) pub=${key#key::} ;;
+  ssh-* | ecdsa-* | sk-*) pub=$key ;;
+  *)
+    key=${key/#\~/$HOME}
+    case $key in *.pub) ;; *) key=$key.pub ;; esac
+    [ -f "$key" ] || die "no public key at $key"
+    pub=$(head -n 1 "$key")
+    ;;
+  esac
+  # Type and base64 only: the comment stays here.
+  pub=$(printf '%s\n' "$pub" | awk '{print $1, $2}')
+  email=$(git -C "$root" config user.email || true)
+  line="${email:-*} namespaces=\"git\" $pub"
+  tmp=$(mktemp)
+  printf '%s\n' "$line" >"$tmp"
+  git -C "$root" -c gpg.ssh.allowedSignersFile="$tmp" verify-commit HEAD >/dev/null 2>&1 || rc=$?
+  rm -f "$tmp"
+  [ "$rc" = 0 ] || die "HEAD does not verify with this key: is it signed with user.signingkey?"
+  printf '%s\n' "$line" | rsh "umask 077 && cat >$(q "$dir/allowed_signers.new") && mv -f $(q "$dir/allowed_signers.new") $(q "$dir/allowed_signers")"
+  echo "allowed_signers on the host: $(printf '%s\n' "$pub" | ssh-keygen -lf - | awk '{print $1, $2}')"
 }
 
 cmd_kit_diff() {
@@ -441,6 +476,11 @@ cmd_install() {
   resolve_dir
   [ -z "${KNOWLEDGE_DECKS:-}" ] || env_args="$env_args KNOWLEDGE_DECKS=$(q "$KNOWLEDGE_DECKS")"
   [ -z "${CLAUDE_MODEL:-}" ] || env_args="$env_args CLAUDE_MODEL=$(q "$CLAUDE_MODEL")"
+  case $(trim "${DEPLOY_AUTO:-}") in
+  '') ;;
+  on | off) env_args="$env_args AUTO_DEPLOY=$(trim "$DEPLOY_AUTO")" ;;
+  *) die "DEPLOY_AUTO must be on or off: $DEPLOY_AUTO" ;;
+  esac
   remote="sudo env$env_args $dir/install.sh $dir"
   inv0=$(invocation)
   exitf=$(cmd_window anki-review-install "ssh -t -p $port $(q "$host") $(q "$remote")")
@@ -487,6 +527,9 @@ echo "sync_port=$(docker port anki-sync 8766/tcp 2>/dev/null | head -n 1)"
 echo "sync_data=$(docker exec anki-sync sh -c 'printf "%s %s" "$(stat -c %s /sync/anki/collection.anki2 2>/dev/null || echo none)" "$(ls /sync/anki/media 2>/dev/null | wc -l)"' 2>/dev/null)"
 # install.sh leaves this file, no secrets in it; only the polkit line is read (older files carry token=)
 [ ! -f "$1/install-state" ] || sed -n 's/^polkit=/state_&/p' "$1/install-state"
+echo "deploy_timer=$(systemctl is-active anki-review-deploy.timer 2>/dev/null)"
+echo "deploy_enabled=$(systemctl is-enabled anki-review-deploy.timer 2>/dev/null)"
+[ ! -f "$1/autodeploy-state" ] || sed -n -e 's/^deployed=/deploy_&/p' -e 's/^held=/deploy_&/p' -e 's/^rejected=/deploy_&/p' "$1/autodeploy-state"
 EOF
 }
 
@@ -552,6 +595,19 @@ else:
     else:
         print("sync: self-hosted, anki-sync running on %s, collection %.1f MB, %s media files" % (where, int(parts[0]) / 1e6, parts[1]))
 print("polkit rule:", v.get("state_polkit", "unknown (no install-state)"))
+timer = v.get("deploy_timer", "").strip()
+if timer != "active":
+    enabled = v.get("deploy_enabled", "").strip() == "enabled"
+    print("auto-deploy: off" + (" (the timer is enabled but %s)" % (timer or "unknown") if enabled else ""))
+else:
+    done = v.get("deploy_deployed", "").strip()
+    print("auto-deploy: on, deployed", done[:12] if done else "nothing yet")
+    held = v.get("deploy_held", "").strip().split(" ", 1)
+    if len(held) == 2 and held[0] != done:
+        print("auto-deploy: holding %s: %s" % (held[0][:12], held[1]))
+    bad = v.get("deploy_rejected", "").strip()
+    if bad and bad != done:
+        print("auto-deploy: rejected", bad[:12], "(journalctl -u anki-review-deploy)")
 want, got = os.environ.get("WANT"), v.get("bin", "")
 if not got:
     print("binary: not installed")
@@ -638,7 +694,7 @@ cmd_verify_url() {
 }
 
 case ${1:-} in
-precheck | upload | upload-bin | kit-diff | up | decks | deck-names | wait-decks | tunnel | vnc-password | anki-key | sync-password | \
+precheck | upload | upload-bin | kit-diff | signers | up | decks | deck-names | wait-decks | tunnel | vnc-password | anki-key | sync-password | \
   app-tunnel | wait-setup | install | wait-install | status | restart | sudo-restart) need_host ;;
 esac
 case ${1:-} in
@@ -646,6 +702,7 @@ precheck) cmd_precheck "${2:-new}" ;;
 upload) cmd_upload ;;
 upload-bin) cmd_upload_bin ;;
 kit-diff) cmd_kit_diff ;;
+signers) cmd_signers ;;
 up) cmd_up ;;
 decks) cmd_decks ;;
 deck-names) cmd_deck_names ;;

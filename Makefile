@@ -18,9 +18,10 @@ test:
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o $(BIN) ./cmd/anki-review
 
-# The binary for the deploy kit (deploy/README.md).
+# The binary for the deploy kit (deploy/README.md). No VCS stamp: deploy/autodeploy.sh builds the
+# same flags on the host and restarts only when the bytes differ.
 build-linux:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o $(BIN_LINUX) ./cmd/anki-review
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w' -o $(BIN_LINUX) ./cmd/anki-review
 
 run:
 	go run ./cmd/anki-review

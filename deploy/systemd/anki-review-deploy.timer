@@ -1,0 +1,11 @@
+# Installed by install.sh with AUTO_DEPLOY=on.
+[Unit]
+Description=anki-review: look for a new signed head of main every 5 minutes
+
+[Timer]
+OnActiveSec=1min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target
