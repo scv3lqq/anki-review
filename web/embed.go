@@ -3,7 +3,7 @@ package web
 
 import "embed"
 
-// FS has index.html, app.js and style.css at its root.
+// FS has index.html, app.js, style.css and icon.svg at its root.
 //
-//go:embed index.html app.js style.css
+//go:embed index.html app.js style.css icon.svg
 var FS embed.FS

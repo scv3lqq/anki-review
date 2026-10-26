@@ -70,6 +70,7 @@ var (
 		"script-src 'self'",
 		"style-src 'self' https://fonts.googleapis.com",
 		"font-src https://fonts.gstatic.com",
+		"img-src 'self'",
 		"connect-src 'self'",
 		"base-uri 'none'",
 		"form-action 'none'",
@@ -78,7 +79,7 @@ var (
 	// DNS rebinding guard: a foreign page resolved to 127.0.0.1 must not read the answer keys.
 	// A reverse proxy in front has to pass Host 127.0.0.1:<port>.
 	reLocalHost = regexp.MustCompile(`^(127\.0\.0\.1|localhost)(:\d+)?$`)
-	assetNames  = []string{"index.html", "app.js", "style.css"}
+	assetNames  = []string{"index.html", "app.js", "style.css", "icon.svg"}
 )
 
 type asset struct {
@@ -93,7 +94,8 @@ type handler struct {
 	assets map[string]asset
 }
 
-// New returns the routes behind the host guard. static must hold index.html, app.js and style.css.
+// New returns the routes behind the host guard. static must hold index.html, app.js, style.css and
+// icon.svg.
 // review returns the review service while the server is unlocked and nil while it is locked.
 func New(own Owner, review func() Service, static fs.FS, log zerolog.Logger) (http.Handler, error) {
 	h := &handler{own: own, review: review, log: log, assets: make(map[string]asset, len(assetNames))}
@@ -109,6 +111,7 @@ func New(own Owner, review func() Service, static fs.FS, log zerolog.Logger) (ht
 	mux.HandleFunc("GET /{$}", h.serveAsset("index.html"))
 	mux.HandleFunc("GET /app.js", h.serveAsset("app.js"))
 	mux.HandleFunc("GET /style.css", h.serveAsset("style.css"))
+	mux.HandleFunc("GET /icon.svg", h.serveAsset("icon.svg"))
 	mux.HandleFunc("GET /api/session", h.session)
 	mux.HandleFunc("POST /api/setup", h.setup)
 	mux.HandleFunc("POST /api/login", h.login)

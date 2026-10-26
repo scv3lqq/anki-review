@@ -70,6 +70,7 @@ var static = fstest.MapFS{
 	"index.html": {Data: []byte("<!doctype html>page")},
 	"app.js":     {Data: []byte("boot()")},
 	"style.css":  {Data: []byte("body{}")},
+	"icon.svg":   {Data: []byte("<svg></svg>")},
 }
 
 // sessionValue is the cookie of the one session fakeOwner accepts.
@@ -181,6 +182,7 @@ func TestAssets(t *testing.T) {
 		{"/", "text/html; charset=utf-8", "page"},
 		{"/app.js", "text/javascript; charset=utf-8", "boot()"},
 		{"/style.css", "text/css; charset=utf-8", "body{}"},
+		{"/icon.svg", "image/svg+xml", "<svg>"},
 	}
 	for _, tt := range tests {
 		rec := do(h, http.MethodGet, tt.path, "127.0.0.1", "", "")
