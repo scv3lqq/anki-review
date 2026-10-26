@@ -1,6 +1,6 @@
 ---
 name: setup-anki-review
-description: Set up anki-review from a fresh clone, locally (macOS, Linux) or on a Linux server over ssh with headless Anki, and update that server. Fixes prerequisites, writes .env, builds, starts, verifies. Use for "set up anki-review", "deploy to my server", "update the server", "check my setup".
+description: Set up anki-review from a fresh clone, locally (macOS, Linux) or on a Linux server over ssh with headless Anki, and update that server. Fixes prerequisites, writes .env, builds, starts, verifies. Use for "set up anki-review", "deploy to my server", "update the server", "check my setup", "turn auto-deploy / CD on or off", "why didn't main deploy".
 argument-hint: "[check|local|server|server-update]"
 allowed-tools: Read, Edit, Write, Bash(.claude/skills/setup-anki-review/check.sh:*), Bash(.claude/skills/setup-anki-review/server.sh:*), Bash(.claude/skills/setup-anki-review/install-ankiconnect.sh:*), Bash(make:*), Bash(go:*), Bash(curl -sS --fail-with-body --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:*), Bash(curl -sS --fail-with-body http://127.0.0.1:*), Bash(open vnc://127.0.0.1:5901:*), Bash(tmux capture-pane:*), Bash(cp .env.example .env:*), Bash(git check-ignore:*), Bash(claude -p --safe-mode:*), Bash(brew install go:*), Bash(plutil -lint:*)
 ---
