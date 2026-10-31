@@ -23,9 +23,9 @@ configuration code and deploy scripts take precedence when documentation differs
 
 Run commands from the repository root.
 
-- `make check`: golangci-lint v2 and `go test -race ./...`; run before each commit.
-  Tests use fake AnkiConnect and grading CLI implementations in `internal/testutil`,
-  so they need no live Anki or Claude session.
+- `make check`: golangci-lint v2, `go test -race ./...`, and `make check-deploy`;
+  run before each commit. Deployment checks are shell syntax and offline fixtures.
+  Tests use fake AnkiConnect and grading CLIs, so they need no live services.
 - `make build`: build the local static binary with the embedded page.
 - `make build-linux`: build the Linux amd64 binary for the deploy kit.
 - `make run`: run locally, loading optional settings from the ignored `.env`.

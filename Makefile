@@ -5,9 +5,15 @@ BIN_LINUX := bin/anki-review-linux-amd64
 -include .env
 export
 
-.PHONY: check lint test build build-linux run
+.PHONY: check check-deploy lint test build build-linux run
 
-check: lint test
+check: lint test check-deploy
+
+check-deploy:
+	@set -e; for script in deploy/*.sh deploy/anki/*.sh .agents/skills/setup-anki-review/*.sh .claude/skills/setup-anki-review/*.sh; do \
+		bash -n "$$script"; \
+	done
+	bash deploy/test-provider.sh
 
 lint:
 	golangci-lint run ./...
