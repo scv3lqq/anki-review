@@ -213,3 +213,24 @@ diagnostic, allow required human-input waits with tracked process ownership, and
 check staged whitespace because the imported files begin untracked. The requested
 native `skill-dry-run` role was unavailable, so a separate default agent performed
 the same read-only review without changing runtime defaults.
+
+## Implementation review corrections
+
+The post-implementation dry run confirmed diagnostic check mode on an isolated
+fixture (missing environment/prerequisites, no files created). T3 must distinguish
+finite command completion from long-lived tunnel readiness. It must also inspect
+the install window's printed exit code: `wait-install` can itself exit zero after
+reporting a failed window. Apply the same rule to sudo-restart without changing
+the preserved helper scripts. The native implementer role was also unavailable;
+separate default agents owned T1, T2, and T3 with the same scoped contracts.
+
+## Concurrent global state
+
+The global config hash changed during the audit, after earlier preservation checks
+passed. No task command wrote global settings. The original baseline is retained;
+its global identity assertion must not be relabeled as passing. Repository-only
+immutability checks remain required. Native startup/discovery probes are also
+checked against the current global hash before and after execution. Do not restore
+or overwrite concurrent global changes. Report attribution separately when known.
+The user confirmed another Codex agent is updating global settings. Coordination
+was requested with that task; repository and global ownership remain separate.
