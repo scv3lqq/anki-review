@@ -9,11 +9,10 @@
           "n": { "type": "integer" },
           "grade": { "type": "string", "enum": ["Again", "Hard", "Good", "Easy"] },
           "mistake": { "type": "string" },
-          "ref": { "type": "string" },
           "note": { "type": "string" },
           "topic": { "type": "string" }
         },
-        "required": ["n", "grade", "mistake", "ref", "note", "topic"],
+        "required": ["n", "grade", "mistake", "note", "topic"],
         "additionalProperties": false
       }
     }

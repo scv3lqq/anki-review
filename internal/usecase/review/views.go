@@ -23,7 +23,8 @@ type CardsView struct {
 	GradeError string          `json:"gradeError,omitempty"`
 }
 
-// ResultItem is a card with its answer and, unless skipped, Claude's verdict and the key.
+// ResultItem is a card with its answer and, unless skipped, the grader's verdict and the card's back.
+// A skipped card stays due, so its back is withheld.
 type ResultItem struct {
 	N         int                     `json:"n"`
 	Question  string                  `json:"question"`
@@ -32,7 +33,7 @@ type ResultItem struct {
 	Skipped   bool                    `json:"skipped,omitempty"`
 	Grade     domain.Grade            `json:"grade,omitempty"`
 	Mistake   string                  `json:"mistake,omitempty"`
-	Ref       string                  `json:"ref,omitempty"`
+	Back      string                  `json:"back,omitempty"`
 	Note      string                  `json:"note,omitempty"`
 	Topic     string                  `json:"topic,omitempty"`
 	Intervals map[domain.Grade]string `json:"intervals,omitempty"`
@@ -90,7 +91,7 @@ func resultsView(p *domain.Pass) ResultsView {
 		if p.Kind == domain.KindKnowledge {
 			topic = it.Topic
 		}
-		item.Grade, item.Mistake, item.Ref, item.Note, item.Topic, item.Intervals = r.Grade, r.Mistake, r.Ref, r.Note, topic, it.Intervals
+		item.Grade, item.Mistake, item.Back, item.Note, item.Topic, item.Intervals = r.Grade, r.Mistake, it.Back, r.Note, topic, it.Intervals
 		v.Items[i] = item
 	}
 	return v

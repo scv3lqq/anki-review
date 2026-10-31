@@ -105,7 +105,7 @@ func (g *fakeGrader) Grade(ctx context.Context, _ domain.Kind, items []domain.It
 	}
 	results := make([]domain.Result, len(items))
 	for i, it := range items {
-		results[i] = domain.Result{N: it.N, Grade: domain.Good, Ref: "key", Topic: "claude topic"}
+		results[i] = domain.Result{N: it.N, Grade: domain.Good, Note: "note", Topic: "claude topic"}
 	}
 	return results, nil
 }
@@ -225,7 +225,7 @@ func TestFullPass(t *testing.T) {
 		t.Fatalf("Results().Items = %+v", res.Items)
 	}
 	first := res.Items[0]
-	if first.Grade != domain.Good || first.Ref != "key" || first.Topic != "Go Channels" || first.Intervals[domain.Good] != "1d" {
+	if first.Grade != domain.Good || first.Back != "k1" || first.Note != "note" || first.Topic != "Go Channels" || first.Intervals[domain.Good] != "1d" {
 		t.Errorf("graded item = %+v; knowledge topic must come from the card", first)
 	}
 

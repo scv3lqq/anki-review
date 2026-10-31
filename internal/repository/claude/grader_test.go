@@ -97,8 +97,8 @@ func TestCheckResults(t *testing.T) {
 	}{
 		{
 			name:    "all graded, extra number ignored, fields trimmed",
-			results: []r{{"n": 2, "grade": "hard", "ref": " k2 "}, {"n": 1, "grade": "Good"}, {"n": 9, "grade": "Easy"}},
-			want:    []domain.Result{{N: 1, Grade: domain.Good}, {N: 2, Grade: domain.Hard, Ref: "k2"}},
+			results: []r{{"n": 2, "grade": "hard", "note": " k2 "}, {"n": 1, "grade": "Good"}, {"n": 9, "grade": "Easy"}},
+			want:    []domain.Result{{N: 1, Grade: domain.Good}, {N: 2, Grade: domain.Hard, Note: "k2"}},
 		},
 		{name: "missing card", results: []r{{"n": 1, "grade": "Good"}}, wantErr: true},
 		{name: "bad grade", results: []r{{"n": 1, "grade": "Good"}, {"n": 2, "grade": "Perfect"}}, wantErr: true},

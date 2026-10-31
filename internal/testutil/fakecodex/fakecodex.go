@@ -106,7 +106,7 @@ func run(mode string) int {
 	for _, match := range regexp.MustCompile(`(?m)^### (\d+)`).FindAllStringSubmatch(string(prompt), -1) {
 		var n int
 		_, _ = fmt.Sscan(match[1], &n)
-		results = append(results, map[string]any{"n": n, "grade": "Good", "mistake": "", "ref": "reference", "note": "note", "topic": "topic"})
+		results = append(results, map[string]any{"n": n, "grade": "Good", "mistake": "", "note": "codex note", "topic": "topic"})
 	}
 	if mode == IncompleteOnce {
 		raw, _ := os.ReadFile(os.Getenv("FAKE_CODEX_CALLS"))

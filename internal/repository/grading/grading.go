@@ -22,7 +22,6 @@ type Output struct {
 		N       int    `json:"n"`
 		Grade   string `json:"grade"`
 		Mistake string `json:"mistake"`
-		Ref     string `json:"ref"`
 		Note    string `json:"note"`
 		Topic   string `json:"topic"`
 	} `json:"results"`
@@ -39,8 +38,8 @@ func clip(s string) string {
 // Validate requires a valid grade for every item and ignores numbers it didn't ask about.
 func Validate(items []domain.Item, out *Output) ([]domain.Result, error) {
 	type entry = struct {
-		grade                     domain.Grade
-		mistake, ref, note, topic string
+		grade                domain.Grade
+		mistake, note, topic string
 	}
 	requested := make(map[int]bool, len(items))
 	for _, item := range items {
@@ -60,7 +59,7 @@ func Validate(items []domain.Item, out *Output) ([]domain.Result, error) {
 		if !ok {
 			continue
 		}
-		byN[r.N] = entry{g, r.Mistake, r.Ref, r.Note, r.Topic}
+		byN[r.N] = entry{g, r.Mistake, r.Note, r.Topic}
 	}
 	results := make([]domain.Result, 0, len(items))
 	var missing []string
@@ -70,7 +69,7 @@ func Validate(items []domain.Item, out *Output) ([]domain.Result, error) {
 			missing = append(missing, fmt.Sprint(it.N))
 			continue
 		}
-		results = append(results, domain.Result{N: it.N, Grade: e.grade, Mistake: clip(e.mistake), Ref: clip(e.ref), Note: clip(e.note), Topic: clip(e.topic)})
+		results = append(results, domain.Result{N: it.N, Grade: e.grade, Mistake: clip(e.mistake), Note: clip(e.note), Topic: clip(e.topic)})
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("%w: no valid grade for cards %s", ErrIncomplete, strings.Join(missing, ", "))

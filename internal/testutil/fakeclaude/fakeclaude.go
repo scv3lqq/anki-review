@@ -91,7 +91,7 @@ func run(mode string) int {
 	for _, m := range reCardHeader.FindAllStringSubmatch(string(prompt), -1) {
 		var n int
 		_, _ = fmt.Sscan(m[1], &n)
-		results = append(results, map[string]any{"n": n, "grade": "Good", "mistake": "", "ref": "ref", "note": "note", "topic": "topic"})
+		results = append(results, map[string]any{"n": n, "grade": "Good", "mistake": "", "note": "note", "topic": "topic"})
 	}
 
 	switch mode {

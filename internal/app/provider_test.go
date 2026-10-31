@@ -55,11 +55,12 @@ func TestCodexRoutingAndConfirmation(t *testing.T) {
 	c.post("/api/answers", map[string]any{"session": cards.Session, "answers": []map[string]any{{"n": 1, "answer": "answer"}}})
 	var results struct {
 		Items []struct {
-			Ref string `json:"ref"`
+			Back string `json:"back"`
+			Note string `json:"note"`
 		} `json:"items"`
 	}
 	c.poll("/api/results", &results)
-	if codexCalls() != 2 || claudeCalls() != 0 || len(results.Items) != 1 || results.Items[0].Ref != "reference" {
+	if codexCalls() != 2 || claudeCalls() != 0 || len(results.Items) != 1 || results.Items[0].Note != "codex note" || results.Items[0].Back != "Answer" {
 		t.Fatalf("wrong grading provider: codex %d Claude %d results %+v", codexCalls(), claudeCalls(), results)
 	}
 	if len(anki.Answered()) != 0 {
@@ -83,7 +84,7 @@ func TestCodexRoutingAndConfirmation(t *testing.T) {
 	c.get("/api/cards", &cards)
 	c.post("/api/answers", map[string]any{"session": cards.Session, "answers": []map[string]any{{"n": 1, "answer": "second"}}})
 	c.poll("/api/results", &results)
-	if claudeCalls() != 1 || codexCalls() != 2 || len(results.Items) != 1 || results.Items[0].Ref != "ref" {
+	if claudeCalls() != 1 || codexCalls() != 2 || len(results.Items) != 1 || results.Items[0].Note != "note" || results.Items[0].Back != "Second answer" {
 		t.Fatal("settings did not change the actual grader")
 	}
 	if len(anki.Answered()) != 1 {

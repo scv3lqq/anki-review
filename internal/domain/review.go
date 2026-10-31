@@ -126,7 +126,6 @@ type Result struct {
 	N       int    `json:"n"`
 	Grade   Grade  `json:"grade"`
 	Mistake string `json:"mistake"`
-	Ref     string `json:"ref"`
 	Note    string `json:"note"`
 	Topic   string `json:"topic"`
 }

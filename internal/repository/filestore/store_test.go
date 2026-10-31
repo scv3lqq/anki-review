@@ -57,6 +57,25 @@ func TestLoadMissing(t *testing.T) {
 	}
 }
 
+// A pass saved by an older version still carries the grader's "ref" field: it must load.
+func TestLoadIgnoresDroppedResultFields(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"version":1,"pass":{"session":"a1","items":[{"n":1,"back":"запрещать"}],"answers":[{"n":1,"answer":"forbid"}],` +
+		`"results":[{"n":1,"grade":"Good","mistake":"","ref":"forbid; prohibit","note":"n","topic":"t"}],"confirmed":null,"status":null}}`
+	if err := os.WriteFile(filepath.Join(dir, fileName), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := New(dir)
+	p, err := s.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	want := []domain.Result{{N: 1, Grade: domain.Good, Note: "n", Topic: "t"}}
+	if !reflect.DeepEqual(p.Results, want) || p.Items[0].Back != "запрещать" {
+		t.Errorf("Load() = %+v", p)
+	}
+}
+
 func TestLoadRejectsOtherVersion(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, fileName), []byte(`{"version":99,"pass":null}`), 0o600); err != nil {

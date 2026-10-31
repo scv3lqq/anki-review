@@ -227,12 +227,12 @@ func TestReviewPass(t *testing.T) {
 		Items []struct {
 			N       int    `json:"n"`
 			Grade   string `json:"grade"`
-			Ref     string `json:"ref"`
+			Back    string `json:"back"`
 			Skipped bool   `json:"skipped"`
 		} `json:"items"`
 	}
 	c.poll("/api/results", &results)
-	if len(results.Items) != 2 || results.Items[0].Grade != "Good" || results.Items[0].Ref != "ref" || !results.Items[1].Skipped {
+	if len(results.Items) != 2 || results.Items[0].Grade != "Good" || results.Items[0].Back != "Runs the call when the function returns" || !results.Items[1].Skipped || results.Items[1].Back != "" {
 		t.Fatalf("results = %+v", results.Items)
 	}
 	if got := calls(); got != 1 {

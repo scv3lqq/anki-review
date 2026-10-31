@@ -523,7 +523,7 @@ function resultRow(item) {
   const facts = el("dl", { class: "kv" },
     el("dt", {}, "You"), el("dd", { class: "you" }, item.answer === "?" ? "don't know" : item.answer),
     item.mistake && [el("dt", {}, "Mistake"), el("dd", { class: "err" }, ...rich(item.mistake))],
-    item.ref && [el("dt", {}, "Key"), el("dd", {}, ...rich(item.ref))],
+    item.back && [el("dt", {}, "Key"), el("dd", {}, ...rich(item.back))],
     item.note && [el("dt", {}, "Note"), el("dd", { class: "note" }, ...rich(item.note))]);
   const buttons = el("div", { class: "grades" }, ...GRADES.map((g) => el("button", {
     type: "button",
