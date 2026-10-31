@@ -5,11 +5,13 @@ import (
 	"fmt"
 )
 
-// Secrets are the tokens the owner enters on the setup page. They are sealed on disk and live in
-// memory only while the server is unlocked.
+// Secrets are the credentials the owner enters on the setup page. They are sealed on disk and
+// live in memory only while the server is unlocked.
 type Secrets struct {
-	ClaudeToken string `json:"claude_token"`
-	AnkiKey     string `json:"anki_key"`
+	ClaudeToken    string `json:"claude_token"`
+	AnkiKey        string `json:"anki_key"`
+	GraderProvider string `json:"grader_provider,omitempty"`
+	CodexAuth      string `json:"codex_auth,omitempty"`
 }
 
 // ErrCredentials is a wrong login or password; the vault and the owner use case both return it.

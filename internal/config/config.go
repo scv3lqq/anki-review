@@ -20,6 +20,9 @@ type Config struct {
 	AnkiSync       bool
 	ClaudeBin      string
 	ClaudeModel    string
+	GraderProvider string
+	CodexBin       string
+	CodexModel     string
 	GradeTimeout   time.Duration
 	LogLevel       zerolog.Level
 }
@@ -38,15 +41,22 @@ func Load(getenv func(string) string) (Config, error) {
 		return def
 	}
 	c := Config{
-		DataDir:     get("DATA_DIR", "data"),
-		AnkiURL:     get("ANKI_CONNECT_URL", "http://127.0.0.1:8765"),
-		ClaudeBin:   get("CLAUDE_BIN", "claude"),
-		ClaudeModel: get("CLAUDE_MODEL", ""),
+		DataDir:        get("DATA_DIR", "data"),
+		AnkiURL:        get("ANKI_CONNECT_URL", "http://127.0.0.1:8765"),
+		ClaudeBin:      get("CLAUDE_BIN", "claude"),
+		ClaudeModel:    get("CLAUDE_MODEL", ""),
+		GraderProvider: get("GRADER_PROVIDER", "claude"),
+		CodexBin:       get("CODEX_BIN", "codex"),
+		CodexModel:     get("CODEX_MODEL", ""),
 	}
 	for _, d := range strings.Split(get("KNOWLEDGE_DECKS", "Tech,Career"), ",") {
 		if d = strings.TrimSpace(d); d != "" {
 			c.KnowledgeDecks = append(c.KnowledgeDecks, d)
 		}
+	}
+
+	if c.GraderProvider != "claude" && c.GraderProvider != "codex" {
+		return Config{}, fmt.Errorf("config: GRADER_PROVIDER must be claude or codex, got %q", c.GraderProvider)
 	}
 
 	var err error

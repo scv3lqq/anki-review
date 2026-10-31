@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+
+	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/scv3lqq/anki-review/internal/domain"
 )
@@ -246,5 +249,253 @@ func TestNewRejectsCost(t *testing.T) {
 				t.Error("New() accepted a cost outside the bounds")
 			}
 		})
+	}
+}
+
+func TestLegacySecretsAndEnvelopeCompatibility(t *testing.T) {
+	v := fastVault(t)
+	salt := []byte("0123456789abcdef")
+	nonce := []byte("012345678901234567890123")
+	key := deriveKey(testPassword, salt, v.cost)
+	defer clear(key)
+	cipher, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := file{Version: 1, User: testUser, KDF: kdfParams{Name: "argon2id", Time: 1, MemoryKiB: 8, Threads: 1, Salt: base64.StdEncoding.EncodeToString(salt)}, Nonce: base64.StdEncoding.EncodeToString(nonce)}
+	legacy.Sealed = base64.StdEncoding.EncodeToString(cipher.Seal(nil, nonce, []byte(`{"claude_token":"sk-ant-oat01-test","anki_key":"anki-key"}`), aad(testUser)))
+	writeFile(t, v, legacy)
+	got, err := v.Open(testUser, testPassword)
+	if err != nil || got != testSecrets {
+		t.Fatalf("Open legacy vault = %+v, %v", got, err)
+	}
+	if err := v.Reseal(got); err != nil {
+		t.Fatal(err)
+	}
+	next := readFile(t, v)
+	if next.Version != 1 || next.User != legacy.User || next.KDF != legacy.KDF {
+		t.Fatal("reseal changed legacy envelope metadata")
+	}
+	sealed, err := base64.StdEncoding.DecodeString(next.Sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextNonce, err := base64.StdEncoding.DecodeString(next.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := cipher.Open(nil, nextNonce, sealed, aad(testUser))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(plain) != `{"claude_token":"sk-ant-oat01-test","anki_key":"anki-key"}` {
+		t.Fatalf("legacy payload shape changed: %s", plain)
+	}
+}
+
+func codexSecrets() domain.Secrets {
+	return domain.Secrets{ClaudeToken: "old-claude", AnkiKey: "anki-key", GraderProvider: "codex", CodexAuth: `{"tokens":{"access_token":"fake-access","refresh_token":"fake-refresh","id_token":"fake-id","account_id":"fake-account"},"unknown":{"preserved":true}}`}
+}
+
+func TestOpaqueCodexCredentialsRoundTrip(t *testing.T) {
+	v := fastVault(t)
+	want := codexSecrets()
+	if err := v.Seal(testUser, testPassword, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := v.Open(testUser, testPassword)
+	if err != nil || got != want {
+		t.Fatalf("Open() = %+v, %v; want exact opaque snapshot", got, err)
+	}
+	raw, err := os.ReadFile(v.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "fake-access") || strings.Contains(string(raw), "fake-refresh") {
+		t.Fatal("credential appeared in plaintext envelope")
+	}
+}
+
+func TestResealRequiresUnlockedHandle(t *testing.T) {
+	v := sealed(t)
+	restarted, err := New(filepath.Dir(v.path), WithCost(1, 8, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := readFile(t, v)
+	if err := restarted.Reseal(codexSecrets()); !errors.Is(err, ErrLocked) {
+		t.Fatalf("Reseal before unlock = %v, want ErrLocked", err)
+	}
+	if after := readFile(t, v); after != before {
+		t.Fatal("locked reseal changed vault")
+	}
+	if _, err := restarted.Open(testUser, "wrong password"); !errors.Is(err, domain.ErrCredentials) {
+		t.Fatal(err)
+	}
+	if err := restarted.Reseal(codexSecrets()); !errors.Is(err, ErrLocked) {
+		t.Fatalf("failed unlock installed handle: %v", err)
+	}
+}
+
+func TestResealUsesCurrentKeyAndFreshNonce(t *testing.T) {
+	for _, unlock := range []string{"seal", "open"} {
+		t.Run(unlock, func(t *testing.T) {
+			v := sealed(t)
+			if unlock == "open" {
+				var err error
+				v, err = New(filepath.Dir(v.path), WithCost(2, 16, 2))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := v.Open(testUser, testPassword); err != nil {
+					t.Fatal(err)
+				}
+			}
+			first := readFile(t, v)
+			next := codexSecrets()
+			for range 2 {
+				if err := v.Reseal(next); err != nil {
+					t.Fatal(err)
+				}
+				after := readFile(t, v)
+				if first.Nonce == after.Nonce {
+					t.Fatal("reseal reused nonce")
+				}
+				if first.KDF != after.KDF || first.User != after.User || after.Version != 1 {
+					t.Fatal("reseal changed KDF or envelope metadata")
+				}
+				first = after
+			}
+			reopened, err := New(filepath.Dir(v.path), WithCost(1, 8, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := reopened.Open(testUser, testPassword)
+			if err != nil || got != next {
+				t.Fatalf("Open resealed = %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestPasswordChangeReplacesResealHandle(t *testing.T) {
+	v := sealed(t)
+	if err := v.Seal("new-owner", "new-password", testSecrets); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Reseal(codexSecrets()); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := New(filepath.Dir(v.path), WithCost(1, 8, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.Open(testUser, testPassword); !errors.Is(err, domain.ErrCredentials) {
+		t.Fatalf("old password opens changed vault: %v", err)
+	}
+	got, err := reopened.Open("new-owner", "new-password")
+	if err != nil || got != codexSecrets() {
+		t.Fatalf("Open new password = %+v, %v", got, err)
+	}
+}
+
+func TestFailedSealPreservesCurrentHandle(t *testing.T) {
+	v := sealed(t)
+	original := v.path
+	v.path = filepath.Join(t.TempDir(), "missing", fileName)
+	if err := v.Seal("new-owner", "new-password", codexSecrets()); err == nil {
+		t.Fatal("Seal unexpectedly succeeded")
+	}
+	v.path = original
+	if err := v.Reseal(codexSecrets()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := v.Open(testUser, testPassword)
+	if err != nil || got != codexSecrets() {
+		t.Fatalf("failed seal replaced current key: %+v, %v", got, err)
+	}
+}
+
+func TestCloseLocksVaultUntilSuccessfulUnlock(t *testing.T) {
+	v := sealed(t)
+	v.Close()
+	v.Close()
+	if err := v.Reseal(codexSecrets()); !errors.Is(err, ErrLocked) {
+		t.Fatalf("Reseal after Close = %v", err)
+	}
+	if _, err := v.Open(testUser, testPassword); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Reseal(codexSecrets()); err != nil {
+		t.Fatalf("successful unlock did not restore handle: %v", err)
+	}
+}
+
+func TestRetainedKeyIsClearedOnReplacementAndClose(t *testing.T) {
+	v := sealed(t)
+	firstKey := v.handle.key
+	if err := v.Seal(testUser, "new-password", testSecrets); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range firstKey {
+		if b != 0 {
+			t.Fatal("password change left the old key in memory")
+		}
+	}
+	secondKey := v.handle.key
+	v.Close()
+	for _, b := range secondKey {
+		if b != 0 {
+			t.Fatal("Close left the current key in memory")
+		}
+	}
+}
+
+func TestFailedResealCanRetryWithCurrentHandle(t *testing.T) {
+	v := sealed(t)
+	before := readFile(t, v)
+	original := v.path
+	v.path = filepath.Join(t.TempDir(), "missing", fileName)
+	if err := v.Reseal(codexSecrets()); err == nil {
+		t.Fatal("Reseal unexpectedly succeeded")
+	}
+	v.path = original
+	if after := readFile(t, v); after != before {
+		t.Fatal("failed reseal changed the current vault")
+	}
+	if err := v.Reseal(codexSecrets()); err != nil {
+		t.Fatalf("retry lost encryption handle: %v", err)
+	}
+	got, err := v.Open(testUser, testPassword)
+	if err != nil || got != codexSecrets() {
+		t.Fatalf("Open retry = %+v, %v", got, err)
+	}
+}
+
+func TestConcurrentVaultOperations(t *testing.T) {
+	v := sealed(t)
+	var operations sync.WaitGroup
+	failures := make(chan error, 24)
+	for range 8 {
+		operations.Go(func() {
+			if err := v.Reseal(testSecrets); err != nil && !errors.Is(err, ErrLocked) {
+				failures <- err
+			}
+		})
+		operations.Go(func() {
+			if _, err := v.Open(testUser, testPassword); err != nil {
+				failures <- err
+			}
+		})
+		operations.Go(v.Close)
+	}
+	operations.Wait()
+	close(failures)
+	for err := range failures {
+		t.Error(err)
+	}
+	got, err := v.Open(testUser, testPassword)
+	if err != nil || got != testSecrets {
+		t.Fatalf("Open after concurrent operations = %+v, %v", got, err)
 	}
 }

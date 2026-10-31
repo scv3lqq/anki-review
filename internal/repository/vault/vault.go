@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -43,6 +44,9 @@ const (
 // ErrDamaged means the file is not a vault this version can open. Deleting it starts setup over.
 var ErrDamaged = errors.New("vault damaged")
 
+// ErrLocked means no successful Seal or Open has supplied a current encryption key.
+var ErrLocked = errors.New("vault locked")
+
 // cost is the Argon2id cost of a seal.
 type cost struct {
 	time      uint32
@@ -60,8 +64,10 @@ func WithCost(time, memoryKiB uint32, threads uint8) Option {
 
 // Vault is the sealed file in a directory only the owner can read.
 type Vault struct {
-	path string
-	cost cost
+	path   string
+	cost   cost
+	mu     sync.Mutex
+	handle *unlockHandle
 }
 
 // New creates the directory if needed. The defaults are Argon2id t=3, m=64 MiB, p=4.
@@ -109,17 +115,51 @@ func (v *Vault) Exists() (bool, error) {
 	}
 }
 
+// unlockHandle retains only the derived key and public envelope metadata, never the password.
+type unlockHandle struct {
+	key  []byte
+	user string
+	kdf  kdfParams
+}
+
 // Seal replaces the file with s sealed under a key from password. Every seal draws a new salt and nonce.
 func (v *Vault) Seal(user, password string, s domain.Secrets) error {
-	plain, err := json.Marshal(s)
-	if err != nil {
-		return fmt.Errorf("vault: encode: %w", err)
-	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	salt := make([]byte, saltSize)
 	if _, err := rand.Read(salt); err != nil {
 		return fmt.Errorf("vault: salt: %w", err)
 	}
-	aead, err := chacha20poly1305.NewX(deriveKey(password, salt, v.cost))
+	key := deriveKey(password, salt, v.cost)
+	defer clear(key)
+	handle := unlockHandle{key: key, user: user, kdf: kdfParams{
+		Name: kdfName, Time: v.cost.time, MemoryKiB: v.cost.memoryKiB, Threads: v.cost.threads,
+		Salt: base64.StdEncoding.EncodeToString(salt),
+	}}
+	if err := v.seal(s, handle); err != nil {
+		return err
+	}
+	v.installHandle(handle)
+	return nil
+}
+
+// Reseal updates credentials using the unlocked key and a fresh nonce, preserving the KDF metadata.
+func (v *Vault) Reseal(s domain.Secrets) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.handle == nil {
+		return ErrLocked
+	}
+	return v.seal(s, *v.handle)
+}
+
+func (v *Vault) seal(s domain.Secrets, handle unlockHandle) error {
+	plain, err := json.Marshal(s)
+	if err != nil {
+		return fmt.Errorf("vault: encode: %w", err)
+	}
+	defer clear(plain)
+	aead, err := chacha20poly1305.NewX(handle.key)
 	if err != nil {
 		return fmt.Errorf("vault: cipher: %w", err)
 	}
@@ -127,17 +167,9 @@ func (v *Vault) Seal(user, password string, s domain.Secrets) error {
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("vault: nonce: %w", err)
 	}
-	sealed := aead.Seal(nil, nonce, plain, aad(user))
+	sealed := aead.Seal(nil, nonce, plain, aad(handle.user))
 	raw, err := json.Marshal(file{
-		Version: version,
-		User:    user,
-		KDF: kdfParams{
-			Name:      kdfName,
-			Time:      v.cost.time,
-			MemoryKiB: v.cost.memoryKiB,
-			Threads:   v.cost.threads,
-			Salt:      base64.StdEncoding.EncodeToString(salt),
-		},
+		Version: version, User: handle.user, KDF: handle.kdf,
 		Nonce:  base64.StdEncoding.EncodeToString(nonce),
 		Sealed: base64.StdEncoding.EncodeToString(sealed),
 	})
@@ -147,9 +179,11 @@ func (v *Vault) Seal(user, password string, s domain.Secrets) error {
 	return v.write(raw)
 }
 
-// Open returns the sealed tokens. A wrong login or password gives domain.ErrCredentials; the user
-// check and the AEAD check both run, so the two failures can't be told apart by timing.
+// Open returns the sealed credentials. A wrong login or password gives domain.ErrCredentials;
+// the user check and AEAD check both run so timing does not distinguish these failures.
 func (v *Vault) Open(user, password string) (domain.Secrets, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	raw, err := os.ReadFile(v.path)
 	if err != nil {
 		return domain.Secrets{}, fmt.Errorf("vault: open: %w", err)
@@ -159,12 +193,15 @@ func (v *Vault) Open(user, password string) (domain.Secrets, error) {
 		return domain.Secrets{}, fmt.Errorf("vault: %s: %w", v.path, err)
 	}
 	c := cost{time: f.KDF.Time, memoryKiB: f.KDF.MemoryKiB, threads: f.KDF.Threads}
-	aead, err := chacha20poly1305.NewX(deriveKey(password, salt, c))
+	key := deriveKey(password, salt, c)
+	defer clear(key)
+	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
 		return domain.Secrets{}, fmt.Errorf("vault: cipher: %w", err)
 	}
 	userOK := subtle.ConstantTimeCompare([]byte(user), []byte(f.User)) == 1
 	plain, err := aead.Open(nil, nonce, sealed, aad(f.User))
+	defer clear(plain)
 	if !userOK || err != nil {
 		return domain.Secrets{}, domain.ErrCredentials
 	}
@@ -172,7 +209,29 @@ func (v *Vault) Open(user, password string) (domain.Secrets, error) {
 	if err := json.Unmarshal(plain, &s); err != nil {
 		return domain.Secrets{}, damaged(v.path, fmt.Sprintf("decode secrets: %v", err))
 	}
+	v.installHandle(unlockHandle{key: key, user: f.User, kdf: f.KDF})
 	return s, nil
+}
+
+// Close clears the retained encryption key. A successful Seal or Open unlocks the vault again.
+func (v *Vault) Close() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.clearHandle()
+}
+
+// installHandle runs only after authentication or persistence has succeeded, while mu is held.
+func (v *Vault) installHandle(handle unlockHandle) {
+	v.clearHandle()
+	handle.key = append([]byte(nil), handle.key...)
+	v.handle = &handle
+}
+
+func (v *Vault) clearHandle() {
+	if v.handle != nil {
+		clear(v.handle.key)
+		v.handle = nil
+	}
 }
 
 // parse checks the file's shape and KDF bounds before any password is tried.

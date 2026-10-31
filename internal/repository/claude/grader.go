@@ -14,11 +14,10 @@ import (
 	"time"
 
 	"github.com/scv3lqq/anki-review/internal/domain"
+	"github.com/scv3lqq/anki-review/internal/repository/grading"
 )
 
 const (
-	attempts  = 2
-	maxField  = 2000
 	tailBytes = 300
 	waitDelay = 10 * time.Second
 	// a check is one tiny call; it fails in seconds unless the network hangs
@@ -28,7 +27,7 @@ const (
 	apiKeyPrefix = "sk-ant-api" //nolint:gosec // G101: a token prefix, not a credential
 )
 
-var errIncomplete = errors.New("incomplete grades from claude")
+var errIncomplete = grading.ErrIncomplete
 
 // Grader runs `claude -p` once per pass.
 type Grader struct {
@@ -49,16 +48,7 @@ type cliResult struct {
 	StructuredOutput json.RawMessage `json:"structured_output"`
 }
 
-type gradesOutput struct {
-	Results []struct {
-		N       int    `json:"n"`
-		Grade   string `json:"grade"`
-		Mistake string `json:"mistake"`
-		Ref     string `json:"ref"`
-		Note    string `json:"note"`
-		Topic   string `json:"topic"`
-	} `json:"results"`
-}
+type gradesOutput = grading.Output
 
 // Grade returns one result per item. Only a malformed answer from Claude is retried: a failed
 // process (auth, usage limits, timeout) would fail the same way again.
@@ -76,7 +66,7 @@ func (g *Grader) Grade(ctx context.Context, kind domain.Kind, items []domain.Ite
 			return nil, err
 		}
 		results, err := checkResults(items, out)
-		if err == nil || !errors.Is(err, errIncomplete) || attempt == attempts {
+		if err == nil || !errors.Is(err, errIncomplete) || attempt == grading.Attempts {
 			return results, err
 		}
 	}
@@ -233,40 +223,6 @@ func tail(s string) string {
 	return s
 }
 
-func clip(s string) string {
-	s = strings.TrimSpace(s)
-	if r := []rune(s); len(r) > maxField {
-		s = string(r[:maxField])
-	}
-	return s
-}
-
-// checkResults wants a valid grade for every item and ignores numbers it didn't ask about.
 func checkResults(items []domain.Item, out *gradesOutput) ([]domain.Result, error) {
-	type entry = struct {
-		grade                     domain.Grade
-		mistake, ref, note, topic string
-	}
-	byN := make(map[int]entry, len(out.Results))
-	for _, r := range out.Results {
-		g, ok := domain.ParseGrade(r.Grade)
-		if !ok {
-			continue
-		}
-		byN[r.N] = entry{g, r.Mistake, r.Ref, r.Note, r.Topic}
-	}
-	results := make([]domain.Result, 0, len(items))
-	var missing []string
-	for _, it := range items {
-		e, ok := byN[it.N]
-		if !ok {
-			missing = append(missing, fmt.Sprint(it.N))
-			continue
-		}
-		results = append(results, domain.Result{N: it.N, Grade: e.grade, Mistake: clip(e.mistake), Ref: clip(e.ref), Note: clip(e.note), Topic: clip(e.topic)})
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("%w: no valid grade for cards %s", errIncomplete, strings.Join(missing, ", "))
-	}
-	return results, nil
+	return grading.Validate(items, out)
 }
