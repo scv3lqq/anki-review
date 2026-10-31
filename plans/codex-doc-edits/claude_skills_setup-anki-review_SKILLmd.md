@@ -117,8 +117,7 @@ Expected `OK` (add `--model "$CLAUDE_MODEL"` when set). Fix every `FAIL` and `wa
 One line per item (`ok`, `info`, `warn`, `FAIL`), exit 1 on any `FAIL`. It validates the settings
 by the server's rules, uses no Claude quota, does not contact a running anki-review, and prints
 only the stage of a saved pass. `GRADER_PROVIDER` is only the initial default; saved selection
-is encrypted. Diagnostics check the configured initial provider. Only for selected Claude Code
-and outside `check` mode, announce then run the Claude smoke test (it uses a little Claude quota):
+is encrypted. Diagnostics check the configured initial provider, not the saved selection. Run the Claude smoke test only outside `check` mode and only when the owner has explicitly identified the current or intended provider as Claude Code. With an existing vault and an unknown saved selection, skip the quota smoke until the owner chooses a provider; never infer it from `GRADER_PROVIDER`. Announce the small Claude quota use before running:
 
 ```sh
 claude -p --safe-mode --tools "" --no-session-persistence "Reply with OK"
