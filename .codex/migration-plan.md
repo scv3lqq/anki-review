@@ -182,7 +182,8 @@ are part of this authorized migration and will be committed with explicit paths.
    exit zero (unstaged checks do not cover untracked files).
    `git diff 8aff7f5 -- .claude` is empty and
    no tracked application file changes. Baseline hashes also prove ignored
-   Claude files, global config, and all four imported helpers unchanged.
+   Claude files and all four imported helpers unchanged. Audit global settings
+   using the explicitly attributed change in Concurrent global state below.
 3. All six native skill files are regular files, with one SKILL.md, executable
    entrypoints, and the non-executable sourced library. `bash -n` succeeds for each
    helper. No extra skill/agent/MCP/hook.
@@ -196,8 +197,9 @@ are part of this authorized migration and will be committed with explicit paths.
 6. Independent skill dry run before implementation and on final instructions,
    scoped plan review, then full acceptance validation. No live setup execution.
 7. Commit scoped verified files with configured signing and push the feature
-   branch under the user's standing authorization. Never merge into main; check
-   CI when a run exists (the workflow runs on main pushes and pull requests).
+   branch under the user's standing authorization. Never merge into main. The CI
+   workflow supports main pushes, pull requests, and manual dispatch; dispatch it
+   on the feature branch after push and inspect its result.
 
 ## Not doing
 
@@ -223,6 +225,9 @@ the install window's printed exit code: `wait-install` can itself exit zero afte
 reporting a failed window. Apply the same rule to sudo-restart without changing
 the preserved helper scripts. The native implementer role was also unavailable;
 separate default agents owned T1, T2, and T3 with the same scoped contracts.
+The `plan-reviewer` and `acceptance-validator` roles were likewise unavailable.
+Independent default agents completed scoped reviews and full local acceptance;
+both returned PASS. Publication and remote CI follow the local acceptance gate.
 
 ## Concurrent global state
 
@@ -234,3 +239,6 @@ checked against the current global hash before and after execution. Do not resto
 or overwrite concurrent global changes. Report attribution separately when known.
 The user confirmed another Codex agent is updating global settings. Coordination
 was requested with that task; repository and global ownership remain separate.
+The other task confirmed it added marketplace/plugin entries and that global
+settings are now stable. It also confirmed the custom roles are discoverable in
+new sessions; this existing session cannot spawn them. No global state is reset.
