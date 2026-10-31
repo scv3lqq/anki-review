@@ -17,6 +17,7 @@ import (
 	"github.com/scv3lqq/anki-review/internal/handler/httpapi"
 	"github.com/scv3lqq/anki-review/internal/repository/ankiconnect"
 	"github.com/scv3lqq/anki-review/internal/repository/claude"
+	"github.com/scv3lqq/anki-review/internal/repository/codex"
 	"github.com/scv3lqq/anki-review/internal/repository/filestore"
 	"github.com/scv3lqq/anki-review/internal/repository/vault"
 	"github.com/scv3lqq/anki-review/internal/usecase/owner"
@@ -38,7 +39,7 @@ type App struct {
 	cfg     config.Config
 	log     zerolog.Logger
 	store   *filestore.Store
-	grader  *claude.Grader
+	grader  review.Grader
 	owner   *owner.UseCase
 	srv     *http.Server
 	mu      sync.Mutex
@@ -57,7 +58,7 @@ func New(cfg config.Config, log zerolog.Logger) (*App, error) {
 		return nil, fmt.Errorf("app: %w", err)
 	}
 	a := &App{cfg: cfg, log: log, store: store}
-	a.grader = &claude.Grader{
+	claudeGrader := &claude.Grader{
 		Bin:     cfg.ClaudeBin,
 		Model:   cfg.ClaudeModel,
 		Timeout: cfg.GradeTimeout,
@@ -65,7 +66,12 @@ func New(cfg config.Config, log zerolog.Logger) (*App, error) {
 		// read per call: a token changed on the settings page applies to the next grading
 		Token: func() string { return a.owner.Secrets().ClaudeToken },
 	}
-	own, err := owner.New(vlt, checker{ankiURL: cfg.AnkiURL, grader: a.grader}, owner.Options{Log: log, OnUnlock: a.unlock})
+	codexGrader := &codex.Grader{Bin: cfg.CodexBin, Model: cfg.CodexModel, Timeout: cfg.GradeTimeout, Dir: cfg.DataDir,
+		Auth:     func() string { return a.owner.Secrets().CodexAuth },
+		SaveAuth: func(previous, next string) error { return a.owner.SaveCodexAuth(previous, next) },
+	}
+	a.grader = providerRouter{secrets: func() domain.Secrets { return a.owner.Secrets() }, claude: claudeGrader, codex: codexGrader}
+	own, err := owner.New(vlt, checker{ankiURL: cfg.AnkiURL, claude: claudeGrader, codex: codexGrader}, owner.Options{Log: log, OnUnlock: a.unlock, DefaultProvider: cfg.GraderProvider})
 	if err != nil {
 		return nil, fmt.Errorf("app: %w", err)
 	}
@@ -112,18 +118,43 @@ func (a *App) reviewService() httpapi.Service {
 	return a.service
 }
 
-// checker proves a token before the owner seals it, with the same AnkiConnect and claude the server uses.
+// checker proves credentials before sealing, using the same adapters as grading.
 type checker struct {
 	ankiURL string
-	grader  *claude.Grader
+	claude  *claude.Grader
+	codex   *codex.Grader
 }
 
 func (c checker) CheckAnki(ctx context.Context, key string) error {
 	return ankiconnect.New(c.ankiURL, func() string { return key }).Version(ctx)
 }
 
-func (c checker) CheckClaude(ctx context.Context, token string) error {
-	return c.grader.Check(ctx, token)
+func (c checker) CheckGrader(ctx context.Context, provider, credential string) (string, error) {
+	if provider == "codex" {
+		if err := codex.ValidateAuth(credential); err != nil {
+			return credential, err
+		}
+		return c.codex.Check(ctx, credential)
+	}
+	return credential, c.claude.Check(ctx, credential)
+}
+
+type providerRouter struct {
+	secrets func() domain.Secrets
+	claude  review.Grader
+	codex   review.Grader
+}
+
+func (r providerRouter) Grade(ctx context.Context, kind domain.Kind, items []domain.Item, answers map[int]string) ([]domain.Result, error) {
+	secrets := r.secrets()
+	switch secrets.GraderProvider {
+	case "codex":
+		return r.codex.Grade(ctx, kind, items, answers)
+	case "", "claude":
+		return r.claude.Grade(ctx, kind, items, answers)
+	default:
+		return nil, fmt.Errorf("app: unsupported saved grading provider")
+	}
 }
 
 // Run listens on the configured loopback address until ctx is done.
@@ -158,6 +189,7 @@ func (a *App) Serve(ctx context.Context, ln net.Listener) error {
 	if svc != nil {
 		closeErr = svc.Close(stopCtx)
 	}
+	a.owner.Close()
 	if errors.Is(serveErr, http.ErrServerClosed) {
 		serveErr = nil
 	}

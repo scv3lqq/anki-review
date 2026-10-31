@@ -13,7 +13,7 @@ const S = {
   answers: {}, touched: {}, grades: {}, open: null,
   results: null, locked: false, written: false, message: "", polling: null, more: 0, taking: false,
   decks: [], deck: null, starting: false, gradeError: "",
-  authed: false, settings: false,
+  authed: false, settings: false, provider: "claude", graderConnected: false,
 };
 
 function el(tag, attrs = {}, ...kids) {
@@ -413,7 +413,7 @@ function renderChecking(note, bad = false) {
   const skipped = S.cards.length - done;
   const counts = [`${done} ${plural(done, "answer")}`];
   if (skipped) counts.push(`${skipped} skipped`);
-  $("check-title").textContent = S.gradeError ? "Check failed" : "Claude is checking your answers";
+  $("check-title").textContent = S.gradeError ? "Check failed" : `${S.provider === "codex" ? "Codex" : "Claude"} is checking your answers`;
   $("pulse").hidden = Boolean(S.gradeError);
   $("retry").hidden = !S.gradeError;
   const sub = $("check-sub");
@@ -487,7 +487,7 @@ function showResults(data) {
   S.screen = "results";
   for (const item of S.results) {
     if (item.skipped) continue;
-    // the confirmed grade is final; an unsent change of mine beats Claude's grade
+    // the confirmed grade is final; an unsent change of mine beats the suggested grade
     S.grades[item.n] = data.confirmed?.[item.n] ?? (GRADES.includes(S.grades[item.n]) ? S.grades[item.n] : item.grade);
   }
   if (S.open === null) S.open = Object.fromEntries(S.results.filter((i) => i.grade === "Again" || i.grade === "Hard").map((i) => [i.n, true]));
@@ -659,8 +659,8 @@ $("write").addEventListener("click", write);
 
 // ---------- setup, login, settings ----------
 
-const SETUP_FIELDS = { user: "setup-user", password: "setup-password", claude_token: "setup-claude", anki_key: "setup-anki" };
-const SETTINGS_FIELDS = { password: "set-current", new_password: "set-new", claude_token: "set-claude", anki_key: "set-anki" };
+const SETUP_FIELDS = { grader_provider: "setup-provider", codex_auth: "setup-codex", user: "setup-user", password: "setup-password", claude_token: "setup-claude", anki_key: "setup-anki" };
+const SETTINGS_FIELDS = { grader_provider: "set-provider", codex_auth: "set-codex", password: "set-current", new_password: "set-new", claude_token: "set-claude", anki_key: "set-anki" };
 
 // the same help text in both forms: each slot takes its template once
 for (const slot of document.querySelectorAll("[data-help]")) slot.replaceWith($(`tpl-${slot.dataset.help}`).content.cloneNode(true));
@@ -673,6 +673,31 @@ for (const button of document.querySelectorAll("[data-reveal]")) {
     button.textContent = reveal ? "Hide" : "Show";
     button.setAttribute("aria-pressed", String(reveal));
   });
+}
+
+function providerFields(prefix) {
+  const codex = $(`${prefix}-provider`).value === "codex";
+  $(`${prefix}-codex-field`).hidden = !codex;
+  $(`${prefix}-claude-field`).hidden = codex;
+}
+for (const prefix of ["setup", "set"]) $(`${prefix}-provider`).addEventListener("change", () => providerFields(prefix));
+
+async function authFile(id, required = false) {
+  const file = $(id).files[0];
+  if (!file) {
+    if (required) throw { field: "codex_auth", message: "Choose auth.json from a dedicated Codex ChatGPT login." };
+    return undefined;
+  }
+  if (file.size > 1024 * 1024) throw { field: "codex_auth", message: "auth.json is too large." };
+  try {
+    const text = await file.text();
+    JSON.parse(text);
+    return text;
+  } catch { throw { field: "codex_auth", message: "Choose a valid auth.json file." }; }
+}
+
+function savedProviderStatus() {
+  $("grader-status").textContent = `${S.provider === "codex" ? "Codex" : "Claude Code"} selected. ${S.graderConnected ? "Credentials saved; checked when selected or replaced. Availability is checked on the next grading call." : "No saved credentials available."}`;
 }
 
 // the checks mirror the server's rules; the server stays the judge
@@ -732,7 +757,7 @@ function markErrors(errors) {
 }
 
 function clearForm(form) {
-  for (const input of form.querySelectorAll("input")) if ($(`${input.id}-error`)) setFieldError(input.id, "");
+  for (const input of form.querySelectorAll("input, select")) if ($(`${input.id}-error`)) setFieldError(input.id, "");
   for (const button of form.querySelectorAll("[data-reveal]")) {
     $(button.dataset.reveal).type = "password";
     button.textContent = "Show";
@@ -748,6 +773,8 @@ function showSetup() {
   S.polling = null;
   $("meta").textContent = "";
   show();
+  $("setup-provider").value = S.provider;
+  providerFields("setup");
   $("setup-user").focus();
 }
 
@@ -769,20 +796,22 @@ async function submitSetup(event) {
   const password = $("setup-password").value;
   const claude = $("setup-claude").value.trim();
   const anki = $("setup-anki").value.trim();
+  const provider = $("setup-provider").value;
   const first = markErrors({
     "setup-user": loginError(user),
     "setup-password": passwordError(password),
     "setup-repeat": password === $("setup-repeat").value ? "" : "The passwords don't match.",
-    "setup-claude": claudeError(claude),
+    "setup-claude": provider === "claude" ? claudeError(claude) : "",
     "setup-anki": ankiError(anki),
   });
   if (first) return $(first).focus();
   const submit = $("setup-submit");
   submit.disabled = true;
   submit.textContent = "Checking…";
-  say("setup-status", "Checking AnkiConnect and Claude, up to a minute…");
+  say("setup-status", `Checking AnkiConnect and ${provider === "codex" ? "Codex" : "Claude"}, up to a minute…`);
   try {
-    await post("api/setup", { user, password, claude_token: claude, anki_key: anki });
+    const codexAuth = provider === "codex" ? await authFile("setup-codex", true) : undefined;
+    await post("api/setup", { user, password, grader_provider: provider, codex_auth: codexAuth, claude_token: provider === "claude" ? claude : "", anki_key: anki });
   } catch (err) {
     submit.disabled = false;
     submit.textContent = "Set up";
@@ -832,6 +861,9 @@ async function logout() {
 function openSettings() {
   S.settings = true;
   clearForm($("settings-form"));
+  $("set-provider").value = S.provider;
+  providerFields("set");
+  savedProviderStatus();
   say("set-status");
   show();
   $("set-current").focus();
@@ -850,24 +882,27 @@ async function saveSettings(event) {
   const repeat = $("set-repeat").value;
   const claude = $("set-claude").value.trim();
   const anki = $("set-anki").value.trim();
+  const provider = $("set-provider").value;
   const changing = next !== "" || repeat !== "";
   const first = markErrors({
     "set-current": current ? "" : "Enter your current password.",
     "set-new": !changing ? "" : next === "" ? "Enter the new password too." : passwordError(next),
     "set-repeat": next !== "" && next !== repeat ? "The passwords don't match." : "",
-    "set-claude": claudeError(claude),
+    "set-claude": provider === "claude" ? claudeError(claude) : "",
     "set-anki": ankiError(anki),
   });
   if (first) return $(first).focus();
   // an empty optional field is not sent: the server keeps the current value
   const body = { password: current };
   if (next) body.new_password = next;
-  if (claude) body.claude_token = claude;
+  if (claude && provider === "claude") body.claude_token = claude;
+  if (provider !== S.provider) body.grader_provider = provider;
   if (anki) body.anki_key = anki;
   const submit = $("set-submit");
   submit.disabled = true;
-  say("set-status");
+  say("set-status", "Checking changes and saving…");
   try {
+    if (provider === "codex") body.codex_auth = await authFile("set-codex");
     await post("api/settings", body);
   } catch (err) {
     submit.disabled = false;
@@ -884,7 +919,12 @@ async function saveSettings(event) {
   }
   submit.disabled = false;
   clearForm($("settings-form"));
-  return say("set-status", "Saved.");
+  S.provider = provider;
+  S.graderConnected = true;
+  $("set-provider").value = provider;
+  providerFields("set");
+  savedProviderStatus();
+  return say("set-status", "Saved. The selected provider will be used on the next grading call.");
 }
 
 $("setup-form").addEventListener("submit", submitSetup);
@@ -908,6 +948,8 @@ async function boot() {
   } catch {
     return showError();
   }
+  S.provider = info.grader_provider || "claude";
+  S.graderConnected = Boolean(info.grader_connected);
   if (info.state === "setup") return showSetup();
   if (info.state === "login") return showLogin();
   S.authed = true;

@@ -76,46 +76,55 @@ type Vault interface {
 	Exists() (bool, error)
 	Seal(user, password string, s domain.Secrets) error
 	Open(user, password string) (domain.Secrets, error)
+	Reseal(domain.Secrets) error
+	Close()
 }
 
 // Checker proves a token works before it is sealed.
 type Checker interface {
 	CheckAnki(ctx context.Context, key string) error
-	CheckClaude(ctx context.Context, token string) error
+	CheckGrader(ctx context.Context, provider, credential string) (string, error)
 }
 
 // Options tune a UseCase; zero values get defaults.
 type Options struct {
-	Log      zerolog.Logger
-	Now      func() time.Time
-	NewToken func() string
+	DefaultProvider string
+	Log             zerolog.Logger
+	Now             func() time.Time
+	NewToken        func() string
 	// OnUnlock runs once, on the first unlock. Its error fails that login and leaves the server locked.
 	OnUnlock func(domain.Secrets) error
 }
 
 // Status is what the page needs to know about one request.
 type Status struct {
-	State    string
-	Unlocked bool
+	GraderProvider  string
+	GraderConnected bool
+	State           string
+	Unlocked        bool
 	// User is the login of the session; set only when State is StateReady.
 	User string
 }
 
 // SetupInput is what the setup form sends.
 type SetupInput struct {
-	User        string
-	Password    string
-	ClaudeToken string
-	AnkiKey     string
+	GraderProvider string
+	CodexAuth      string
+	User           string
+	Password       string
+	ClaudeToken    string
+	AnkiKey        string
 }
 
 // UpdateInput is what the settings form sends. A nil field keeps the current value; a non-nil one
 // replaces it, an empty string included.
 type UpdateInput struct {
-	Password    string
-	NewPassword *string
-	ClaudeToken *string
-	AnkiKey     *string
+	GraderProvider *string
+	CodexAuth      *string
+	Password       string
+	NewPassword    *string
+	ClaudeToken    *string
+	AnkiKey        *string
 }
 
 type session struct {
@@ -181,9 +190,13 @@ func (u *UseCase) Status(token string) Status {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if !u.hasVault {
-		return Status{State: StateSetup}
+		return Status{State: StateSetup, GraderProvider: providerOrClaude(u.opts.DefaultProvider)}
 	}
 	st := Status{State: StateLogin, Unlocked: u.unlocked}
+	if u.unlocked {
+		st.GraderProvider = providerOrClaude(u.secrets.GraderProvider)
+		st.GraderConnected = st.GraderProvider == "claude" || u.secrets.CodexAuth != ""
+	}
 	if s, ok := u.sessionLocked(token); ok {
 		st.State, st.User = StateReady, s.user
 	}
@@ -234,6 +247,13 @@ func (u *UseCase) Setup(ctx context.Context, client string, in SetupInput) (stri
 	if err := checkPassword("password", in.Password); err != nil {
 		return "", err
 	}
+	provider := in.GraderProvider
+	if provider == "" {
+		provider = providerOrClaude(u.opts.DefaultProvider)
+	}
+	if err := checkProvider(provider); err != nil {
+		return "", err
+	}
 	claude, err := cleanClaude(in.ClaudeToken)
 	if err != nil {
 		return "", err
@@ -246,11 +266,22 @@ func (u *UseCase) Setup(ctx context.Context, client string, in SetupInput) (stri
 		u.countFailure(u.clients, client, "setup check failed")
 		return "", err
 	}
-	if err := u.checkClaude(ctx, claude); err != nil {
+	credential := claude
+	if provider == "codex" {
+		credential = in.CodexAuth
+	}
+	checked, err := u.checkGrader(ctx, provider, credential)
+	if err != nil {
 		u.countFailure(u.clients, client, "setup check failed")
 		return "", err
 	}
 	secrets := domain.Secrets{ClaudeToken: claude, AnkiKey: anki}
+	if provider == "codex" {
+		secrets.CodexAuth = checked
+	}
+	if in.GraderProvider != "" || provider != "claude" {
+		secrets.GraderProvider = provider
+	}
 	u.pwMu.Lock()
 	err = u.vault.Seal(user, in.Password, secrets)
 	u.pwMu.Unlock()
@@ -345,13 +376,44 @@ func (u *UseCase) Update(ctx context.Context, token string, in UpdateInput) erro
 		}
 		next.AnkiKey = *anki
 	}
-	if claude != nil {
-		if err := u.checkClaude(ctx, *claude); err != nil {
-			return err
+	next, err = u.updateGrader(ctx, next, in, claude)
+	if err != nil {
+		return err
+	}
+
+	return u.reseal(token, s.user, newPassword, next, version, in.NewPassword != nil)
+}
+
+// updateGrader checks explicitly replaced credentials and provider selections; inactive credentials
+// stay available for a later switch. Check may persist a saved OAuth refresh and invalidate version.
+func (u *UseCase) updateGrader(ctx context.Context, next domain.Secrets, in UpdateInput, claude *string) (domain.Secrets, error) {
+	provider := providerOrClaude(next.GraderProvider)
+	if in.GraderProvider != nil {
+		provider = *in.GraderProvider
+		if err := checkProvider(provider); err != nil {
+			return next, err
 		}
+		next.GraderProvider = provider
+	}
+	if claude != nil {
 		next.ClaudeToken = *claude
 	}
-	return u.reseal(token, s.user, newPassword, next, version, in.NewPassword != nil)
+	if in.CodexAuth != nil {
+		next.CodexAuth = *in.CodexAuth
+	}
+	if claude != nil || (provider == "claude" && in.GraderProvider != nil) {
+		if _, err := u.checkGrader(ctx, "claude", next.ClaudeToken); err != nil {
+			return next, err
+		}
+	}
+	if in.CodexAuth != nil || (provider == "codex" && in.GraderProvider != nil) {
+		checked, err := u.checkGrader(ctx, "codex", next.CodexAuth)
+		if err != nil {
+			return next, err
+		}
+		next.CodexAuth = checked
+	}
+	return next, nil
 }
 
 // verify checks the current password for the session, under pwMu, and returns the session, the
@@ -415,15 +477,73 @@ func (u *UseCase) checkAnki(ctx context.Context, key string) error {
 	return nil
 }
 
-// checkClaude proves the Claude token. An empty token is checked too: it means the server's own login.
-func (u *UseCase) checkClaude(ctx context.Context, token string) error {
-	if err := u.checker.CheckClaude(ctx, token); err != nil {
-		if token == "" {
-			return &FieldError{Field: "claude_token", Message: fmt.Sprintf("Claude did not answer with the server's own login, paste a token: %v", err)}
-		}
-		return &FieldError{Field: "claude_token", Message: fmt.Sprintf("Claude did not answer with this token: %v", err)}
+func providerOrClaude(provider string) string {
+	if provider == "" {
+		return "claude"
+	}
+	return provider
+}
+
+func checkProvider(provider string) error {
+	if provider != "claude" && provider != "codex" {
+		return &FieldError{Field: "grader_provider", Message: "Choose Claude Code or Codex"}
 	}
 	return nil
+}
+
+func (u *UseCase) checkGrader(ctx context.Context, provider, credential string) (string, error) {
+	if provider == "codex" && credential == "" {
+		return "", &FieldError{Field: "codex_auth", Message: "Import auth.json from a dedicated Codex ChatGPT login"}
+	}
+	next, err := u.checker.CheckGrader(ctx, provider, credential)
+	if err == nil {
+		return next, nil
+	}
+	if provider == "codex" {
+		return next, &FieldError{Field: "codex_auth", Message: fmt.Sprintf("Codex could not verify this session. Sign in again and import auth.json: %v", err)}
+	}
+	if credential == "" {
+		return next, &FieldError{Field: "claude_token", Message: fmt.Sprintf("Claude did not answer with the server's own login, paste a token: %v", err)}
+	}
+	return next, &FieldError{Field: "claude_token", Message: fmt.Sprintf("Claude did not answer with this token: %v", err)}
+}
+
+// SaveCodexAuth merges a CLI refresh into the latest settings and encryption handle.
+// Both locks stay held through persistence so password changes cannot replace the handle midway.
+func (u *UseCase) SaveCodexAuth(previous, next string) error {
+	u.pwMu.Lock()
+	defer u.pwMu.Unlock()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if !u.unlocked {
+		return domain.ErrCredentials
+	}
+	if u.secrets.CodexAuth != previous {
+		return ErrChanged
+	}
+	if previous == next {
+		return nil
+	}
+	merged := u.secrets
+	merged.CodexAuth = next
+	if err := u.vault.Reseal(merged); err != nil {
+		return fmt.Errorf("owner: save Codex session: %w", err)
+	}
+	u.secrets = merged
+	u.version++
+	return nil
+}
+
+// Close discards the in-memory credentials and retained vault key after requests have drained.
+func (u *UseCase) Close() {
+	u.pwMu.Lock()
+	defer u.pwMu.Unlock()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.vault.Close()
+	u.secrets = domain.Secrets{}
+	u.unlocked = false
+	clear(u.sessions)
 }
 
 func ankiFailure(err error) error {
@@ -448,6 +568,7 @@ func (u *UseCase) unlockLocked(s domain.Secrets) error {
 	u.secrets = s
 	if err := u.opts.OnUnlock(s); err != nil {
 		u.secrets = domain.Secrets{}
+		u.vault.Close()
 		u.opts.Log.Error().Err(err).Msg("unlock failed")
 		return fmt.Errorf("owner: unlock: %w: %w", ErrUnlock, err)
 	}

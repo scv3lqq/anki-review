@@ -21,10 +21,12 @@ import (
 	"github.com/scv3lqq/anki-review/internal/config"
 	"github.com/scv3lqq/anki-review/internal/testutil/fakeanki"
 	"github.com/scv3lqq/anki-review/internal/testutil/fakeclaude"
+	"github.com/scv3lqq/anki-review/internal/testutil/fakecodex"
 )
 
 func TestMain(m *testing.M) {
 	fakeclaude.Main()
+	fakecodex.Main()
 	os.Exit(m.Run())
 }
 

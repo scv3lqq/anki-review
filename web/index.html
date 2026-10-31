@@ -60,7 +60,7 @@
 
   <section id="checking" class="center" hidden>
     <div class="pulse" id="pulse"><i></i></div>
-    <h2 id="check-title">Claude is checking your answers</h2>
+    <h2 id="check-title">Checking your answers</h2>
     <p id="check-sub"></p>
     <button type="button" class="btn primary" id="retry" hidden>Check again</button>
   </section>
@@ -80,7 +80,7 @@
 
   <section id="setup" class="auth" hidden>
     <h2>Set up</h2>
-    <p class="lede">Create the owner login. The server checks both tokens, then keeps them encrypted under this password.</p>
+    <p class="lede">Create the owner login. Choose a grading provider. The server checks the credentials, then encrypts them under this password.</p>
     <form id="setup-form" novalidate>
       <div class="field">
         <label for="setup-user">Login</label>
@@ -99,6 +99,20 @@
         <p class="field-error" id="setup-repeat-error" hidden></p>
       </div>
       <div class="field">
+        <label for="setup-provider">Grading provider</label>
+        <select id="setup-provider" name="grader_provider" aria-describedby="setup-provider-error">
+          <option value="claude">Claude Code</option>
+          <option value="codex">Codex</option>
+        </select>
+        <p class="field-error" id="setup-provider-error" hidden></p>
+      </div>
+      <div class="field" id="setup-codex-field" hidden>
+        <label for="setup-codex">Codex auth.json</label>
+        <input id="setup-codex" name="codex_auth" type="file" accept="application/json,.json" aria-describedby="setup-codex-error">
+        <p class="field-error" id="setup-codex-error" hidden></p>
+        <div data-help="codex"></div>
+      </div>
+      <div class="field" id="setup-claude-field">
         <label for="setup-claude">Claude token</label>
         <div class="input-row">
           <input id="setup-claude" class="mono" name="claude_token" type="password" autocomplete="off" spellcheck="false" aria-describedby="setup-claude-error">
@@ -144,7 +158,8 @@
 
   <section id="settings" class="auth" hidden>
     <h2>Settings</h2>
-    <p class="lede">Change the password or a token. An empty field keeps its current value.</p>
+    <p class="lede">Change the password, grading provider or credentials. An empty optional field keeps its current value.</p>
+    <p class="note" id="grader-status"></p>
     <form id="settings-form" novalidate>
       <div class="field">
         <label for="set-current">Current password</label>
@@ -163,6 +178,20 @@
         <p class="field-error" id="set-repeat-error" hidden></p>
       </div>
       <div class="field">
+        <label for="set-provider">Grading provider</label>
+        <select id="set-provider" name="grader_provider" aria-describedby="set-provider-error">
+          <option value="claude">Claude Code</option>
+          <option value="codex">Codex</option>
+        </select>
+        <p class="field-error" id="set-provider-error" hidden></p>
+      </div>
+      <div class="field" id="set-codex-field" hidden>
+        <label for="set-codex">Codex auth.json (optional if already saved)</label>
+        <input id="set-codex" name="codex_auth" type="file" accept="application/json,.json" aria-describedby="set-codex-error">
+        <p class="field-error" id="set-codex-error" hidden></p>
+        <div data-help="codex"></div>
+      </div>
+      <div class="field" id="set-claude-field">
         <label for="set-claude">New Claude token (optional)</label>
         <div class="input-row">
           <input id="set-claude" class="mono" name="claude_token" type="password" autocomplete="off" spellcheck="false" aria-describedby="set-claude-error">
@@ -232,6 +261,13 @@
   </details>
 </template>
 
+<template id="tpl-codex">
+  <details class="help">
+    <summary>How to import a ChatGPT session</summary>
+    <p class="note">Use a dedicated Codex login for this service. Follow the setup guide to run <code>codex login --device-auth</code> with a temporary <code>CODEX_HOME</code> and file credential storage, then choose its complete <code>auth.json</code> here. Delete the temporary copy after importing. Codex refreshes the saved session automatically. If authentication fails, repeat the login and import a new file.</p>
+  </details>
+</template>
+
 <template id="tpl-anki">
   <details class="help">
     <summary>How to get it</summary>
@@ -243,7 +279,7 @@
 </template>
 
 <template id="tpl-password">
-  <p class="note">At least 12 characters. It encrypts both tokens on the server: they are decrypted only in the server's memory after you log in, so a copy of its disk doesn't reveal them. After a server restart, log in again to unlock grading. A forgotten password can't be recovered: delete <code>vault.json</code> in the server's data directory and set up again.</p>
+  <p class="note">At least 12 characters. It encrypts credentials on the server: they are decrypted only in the server's memory after you log in, so a copy of its disk doesn't reveal them. After a server restart, log in again to unlock grading. A forgotten password can't be recovered: delete <code>vault.json</code> in the server's data directory and set up again.</p>
 </template>
 </body>
 </html>

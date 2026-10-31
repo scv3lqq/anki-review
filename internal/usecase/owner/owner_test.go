@@ -25,11 +25,13 @@ const (
 
 // fakeVault keeps one sealed owner in memory and checks the same credentials the real vault does.
 type fakeVault struct {
-	exists   bool
-	user     string
-	password string
-	secrets  domain.Secrets
-	seals    int
+	exists    bool
+	user      string
+	password  string
+	secrets   domain.Secrets
+	seals     int
+	resealErr error
+	closed    bool
 }
 
 func (v *fakeVault) Exists() (bool, error) { return v.exists, nil }
@@ -49,6 +51,16 @@ func (v *fakeVault) Open(user, password string) (domain.Secrets, error) {
 	}
 	return v.secrets, nil
 }
+
+func (v *fakeVault) Reseal(s domain.Secrets) error {
+	if v.resealErr != nil {
+		return v.resealErr
+	}
+	v.secrets = s
+	v.seals++
+	return nil
+}
+func (v *fakeVault) Close() { v.closed = true }
 
 // fakeChecker records the tokens it was asked to check and fails with the configured errors.
 type fakeChecker struct {
@@ -71,6 +83,14 @@ func (c *fakeChecker) CheckClaude(_ context.Context, token string) error {
 	c.claude = append(c.claude, token)
 	c.runHook()
 	return c.claudeErr
+}
+
+func (c *fakeChecker) CheckGrader(ctx context.Context, provider, credential string) (string, error) {
+	if provider == "claude" {
+		return credential, c.CheckClaude(ctx, credential)
+	}
+	c.runHook()
+	return credential, nil
 }
 
 func (c *fakeChecker) runHook() {
@@ -316,6 +336,9 @@ func TestOnUnlockErrorLeavesLocked(t *testing.T) {
 	}
 	if st := h.u.Status(""); st.Unlocked {
 		t.Errorf("Status() = %+v, want locked", st)
+	}
+	if !h.vault.closed {
+		t.Error("failed first unlock retained the vault key")
 	}
 	h.unlockErr = nil
 	if _, err := h.login(testUser, testPass); err != nil || h.unlocks != 1 {

@@ -306,7 +306,7 @@ func (h *handler) confirm(w http.ResponseWriter, r *http.Request, svc Service) {
 	if !decode(w, r, &req) {
 		return
 	}
-	// a grade the page got wrong is dropped, so the card keeps Claude's
+	// A grade the page got wrong is dropped, so the card keeps the grader's result.
 	byN := make(map[int]domain.Grade, len(req.Grades))
 	for _, g := range req.Grades {
 		if grade, ok := domain.ParseGrade(g.Grade); ok {
@@ -425,6 +425,10 @@ func (h *handler) ownerFail(w http.ResponseWriter, err error) {
 func (h *handler) session(w http.ResponseWriter, r *http.Request) {
 	st := h.own.Status(sessionToken(r))
 	body := map[string]any{"state": st.State, "unlocked": st.Unlocked}
+	if st.GraderProvider != "" {
+		body["grader_provider"] = st.GraderProvider
+		body["grader_connected"] = st.GraderConnected
+	}
 	if st.State == owner.StateReady {
 		body["user"] = st.User
 	}
@@ -437,10 +441,12 @@ func (h *handler) session(w http.ResponseWriter, r *http.Request) {
 }
 
 type setupRequest struct {
-	User        string `json:"user"`
-	Password    string `json:"password"`
-	ClaudeToken string `json:"claude_token"`
-	AnkiKey     string `json:"anki_key"`
+	GraderProvider string `json:"grader_provider"`
+	CodexAuth      string `json:"codex_auth"`
+	User           string `json:"user"`
+	Password       string `json:"password"`
+	ClaudeToken    string `json:"claude_token"`
+	AnkiKey        string `json:"anki_key"`
 }
 
 func (h *handler) setup(w http.ResponseWriter, r *http.Request) {
@@ -449,7 +455,7 @@ func (h *handler) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token, err := h.own.Setup(r.Context(), clientOf(r), owner.SetupInput{
-		User: req.User, Password: req.Password, ClaudeToken: req.ClaudeToken, AnkiKey: req.AnkiKey,
+		User: req.User, Password: req.Password, ClaudeToken: req.ClaudeToken, AnkiKey: req.AnkiKey, GraderProvider: req.GraderProvider, CodexAuth: req.CodexAuth,
 	})
 	h.signIn(w, r, token, err)
 }
@@ -485,10 +491,12 @@ func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 type settingsRequest struct {
-	Password    string  `json:"password"`
-	NewPassword *string `json:"new_password"`
-	ClaudeToken *string `json:"claude_token"`
-	AnkiKey     *string `json:"anki_key"`
+	GraderProvider *string `json:"grader_provider"`
+	CodexAuth      *string `json:"codex_auth"`
+	Password       string  `json:"password"`
+	NewPassword    *string `json:"new_password"`
+	ClaudeToken    *string `json:"claude_token"`
+	AnkiKey        *string `json:"anki_key"`
 }
 
 func (h *handler) settings(w http.ResponseWriter, r *http.Request) {
@@ -497,7 +505,7 @@ func (h *handler) settings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := h.own.Update(r.Context(), sessionToken(r), owner.UpdateInput{
-		Password: req.Password, NewPassword: req.NewPassword, ClaudeToken: req.ClaudeToken, AnkiKey: req.AnkiKey,
+		Password: req.Password, NewPassword: req.NewPassword, ClaudeToken: req.ClaudeToken, AnkiKey: req.AnkiKey, GraderProvider: req.GraderProvider, CodexAuth: req.CodexAuth,
 	})
 	if err != nil {
 		h.ownerFail(w, err)
