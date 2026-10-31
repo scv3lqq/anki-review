@@ -86,7 +86,7 @@ The kit installs both supported grading CLIs so the owner can switch in Settings
 is retained unless explicitly overridden; an encrypted saved choice always wins. `CLAUDE_MODEL`
 and `CODEX_MODEL` are independent. Existing `CLAUDE_VERSION=x.y.z|stable|latest` behavior remains.
 Codex is pinned to **0.166.0**: the official full Linux x86_64 musl package, including
-`bin/codex-exec-server` and `resources`, is verified before extraction with SHA256
+`bin/codex-exec-server`, `codex-resources` and `codex-package.json`, is verified before extraction with SHA256
 `1d44b28bc4ac9937d7d3532264baa68a507ce364956a0d4ebb856f331cdee254`.
 See the [official release](https://github.com/openai/codex/releases/tag/rust-v0.166.0).
 

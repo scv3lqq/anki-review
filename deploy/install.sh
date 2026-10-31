@@ -200,7 +200,7 @@ else
     printf '%s  %s\n' "$(codex_archive_sha256)" "$stage/package.tar.gz" | sha256sum --check --status || fail "Codex archive checksum mismatch"
     mkdir "$stage/package"
     tar -xzf "$stage/package.tar.gz" -C "$stage/package"
-    [[ -x $stage/package/bin/codex && -x $stage/package/bin/codex-exec-server && -d $stage/package/resources ]] || fail "incomplete Codex package"
+    codex_package_valid "$stage/package" || fail "incomplete Codex package"
     install -d -o root -g root -m 0755 "${package_dir%/*}"
     rm -rf -- "$package_dir"
     mv "$stage/package" "$package_dir"

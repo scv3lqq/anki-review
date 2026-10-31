@@ -23,6 +23,13 @@ codex_archive_sha256() {
   printf '%s' '1d44b28bc4ac9937d7d3532264baa68a507ce364956a0d4ebb856f331cdee254'
 }
 
+# The official full archive keeps resources and metadata beside the bin directory.
+codex_package_valid() {
+  local directory="$1"
+  [[ -x $directory/bin/codex && -x $directory/bin/codex-exec-server &&
+    -d $directory/codex-resources && -f $directory/codex-package.json ]]
+}
+
 # Read only the requested non-secret setting; never source an EnvironmentFile.
 provider_env_value() {
   local file="$1" name="$2" line

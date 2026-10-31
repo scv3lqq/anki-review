@@ -26,6 +26,27 @@ grep -q 'for provider in claude codex' "$root/deploy/smoke.sh"
 grep -q 'codex_archive_sha256' "$root/deploy/install.sh"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "$fixture"' EXIT
+# Match the official full package, not the unrelated legacy resources/ layout.
+package="$fixture/package"
+mkdir -p "$package/bin" "$package/codex-resources"
+touch "$package/bin/codex" "$package/bin/codex-exec-server" "$package/codex-package.json"
+chmod +x "$package/bin/codex" "$package/bin/codex-exec-server"
+codex_package_valid "$package" || { echo 'FAIL: official package rejected'; exit 1; }
+rmdir "$package/codex-resources"
+if codex_package_valid "$package"; then echo 'FAIL: missing resources accepted'; exit 1; fi
+mkdir "$package/resources"
+if codex_package_valid "$package"; then echo 'FAIL: legacy resources-only layout accepted'; exit 1; fi
+mkdir "$package/codex-resources"
+rm "$package/codex-package.json"
+if codex_package_valid "$package"; then echo 'FAIL: missing manifest accepted'; exit 1; fi
+touch "$package/codex-package.json"
+rm "$package/bin/codex-exec-server"
+if codex_package_valid "$package"; then echo 'FAIL: missing sibling accepted'; exit 1; fi
+touch "$package/bin/codex-exec-server"
+if codex_package_valid "$package"; then echo 'FAIL: non-executable sibling accepted'; exit 1; fi
+chmod +x "$package/bin/codex-exec-server"
+chmod -x "$package/bin/codex"
+if codex_package_valid "$package"; then echo 'FAIL: non-executable CLI accepted'; exit 1; fi
 cat >"$fixture/codex" <<'CODEX'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$CALL_LOG"
