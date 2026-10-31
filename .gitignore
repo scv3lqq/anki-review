@@ -17,6 +17,11 @@
 /deploy/anki/secrets/
 /deploy/bin/
 /deploy/claude-token
+# Dedicated OAuth staging must never be committed.
+**/auth.json
+**/.codex/
+**/anki-review-login.*/
+**/anki-review-import.*/
 /deploy/install-state
 /deploy/.install-state.*
 

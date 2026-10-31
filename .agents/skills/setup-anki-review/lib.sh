@@ -35,7 +35,7 @@ load_dotenv() {
     [ "$name" != "$l" ] || continue
     case $name in
     PORT | DATA_DIR | KNOWLEDGE_DECKS | ANKI_CONNECT_URL | ANKI_CONNECT_KEY | ANKI_SYNC | CLAUDE_BIN | \
-      CLAUDE_MODEL | GRADE_TIMEOUT | LOG_LEVEL | DEPLOY_SSH | DEPLOY_SSH_PORT | DEPLOY_DIR | DEPLOY_PORT | DEPLOY_URL | \
+      CLAUDE_MODEL | GRADER_PROVIDER | CODEX_BIN | CODEX_MODEL | GRADE_TIMEOUT | LOG_LEVEL | DEPLOY_SSH | DEPLOY_SSH_PORT | DEPLOY_DIR | DEPLOY_PORT | DEPLOY_URL | \
       DEPLOY_SYNC | DEPLOY_SYNC_URL | DEPLOY_AUTO) ;;
     *) continue ;;
     esac
@@ -55,4 +55,39 @@ load_dotenv() {
 have_python() {
   command -v python3 >/dev/null 2>&1 || return 1
   [ "$os" != Darwin ] || xcode-select -p >/dev/null 2>&1
+}
+
+# Check only the initial provider's executable. Saved provider and credentials stay encrypted.
+# Codex checks never read ambient auth or spend either provider's quota.
+check_grader() {
+  local provider="$1" claude_bin="$2" codex_bin="$3" cb cv st how
+  case $provider in
+  codex)
+    if cb=$(command -v -- "$codex_bin" 2>/dev/null); then
+      cv=$("$cb" --version 2>/dev/null)
+      if [ "$cv" = 'codex-cli 0.166.0' ]; then
+        ok codex "0.166.0 available; import dedicated auth.json on the page"
+      else
+        fail codex "unsupported CLI: install codex-cli 0.166.0"
+      fi
+    else
+      fail codex "configured Codex executable not found"
+    fi
+    ;;
+  claude)
+    if cb=$(command -v -- "$claude_bin" 2>/dev/null); then
+      cv=$("$cb" --version 2>/dev/null | head -n 1)
+      st=$("$cb" auth status --json 2>/dev/null)
+      if printf '%s' "$st" | grep -Eq '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
+        how=$(printf '%s' "$st" | sed -nE 's/.*"authMethod"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n 1)
+        ok claude "${cv:-unknown version} at $cb, logged in (${how:-unknown method})"
+      else
+        warn claude "${cv:-unknown version} at $cb, not logged in (setup-page token may still work)"
+      fi
+    else
+      fail claude "configured Claude executable not found"
+    fi
+    ;;
+  *) fail grader "GRADER_PROVIDER must be claude or codex" ;;
+  esac
 }

@@ -42,7 +42,7 @@ die() {
 
 svc="anki-review"
 bin_local=$root/bin/anki-review-linux-amd64
-kit_top="install.sh smoke.sh autodeploy.sh"
+kit_top="install.sh smoke.sh provider.sh test-provider.sh autodeploy.sh"
 kit_units="anki-review.service anki-review-deploy.service anki-review-deploy.timer"
 kit_anki="Dockerfile compose.yaml entrypoint.sh setup-profile.py syncserver.sh up.sh"
 kit_all="$kit_top systemd/anki-review.service systemd/anki-review-deploy.service systemd/anki-review-deploy.timer anki/Dockerfile anki/compose.yaml anki/entrypoint.sh anki/setup-profile.py anki/syncserver.sh anki/up.sh"
@@ -476,6 +476,10 @@ cmd_install() {
   resolve_dir
   [ -z "${KNOWLEDGE_DECKS:-}" ] || env_args="$env_args KNOWLEDGE_DECKS=$(q "$KNOWLEDGE_DECKS")"
   [ -z "${CLAUDE_MODEL:-}" ] || env_args="$env_args CLAUDE_MODEL=$(q "$CLAUDE_MODEL")"
+  local name
+  for name in GRADER_PROVIDER CODEX_MODEL; do
+    [ -z "${!name:-}" ] || env_args="$env_args $name=$(q "${!name}")"
+  done
   case $(trim "${DEPLOY_AUTO:-}") in
   '') ;;
   on | off) env_args="$env_args AUTO_DEPLOY=$(trim "$DEPLOY_AUTO")" ;;

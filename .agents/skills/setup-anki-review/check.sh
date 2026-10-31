@@ -23,6 +23,8 @@ env_or() {
 port=$(env_or PORT 8767)
 anki_url=$(env_or ANKI_CONNECT_URL http://127.0.0.1:8765)
 claude_bin=$(env_or CLAUDE_BIN claude)
+codex_bin=$(env_or CODEX_BIN codex)
+grader_provider=$(env_or GRADER_PROVIDER claude)
 data_dir=$(env_or DATA_DIR data)
 knowledge=$(env_or KNOWLEDGE_DECKS Tech,Career)
 case $data_dir in /*) ;; *) data_dir=$root/$data_dir ;; esac
@@ -143,6 +145,10 @@ fi
 
 # internal/config refuses to start on these; same rules, all reported at once.
 bad="" port_ok=1 url_ok=1
+case $grader_provider in
+claude | codex) ;;
+*) bad="$bad, GRADER_PROVIDER (claude or codex)" ;;
+esac
 p=${port#+}
 p=${p#"${p%%[!0]*}"}
 case $p in
@@ -172,7 +178,7 @@ fi
 if [ -n "$bad" ]; then
   fail config "the server would refuse to start: ${bad#, }"
 else
-  ok config "PORT, ANKI_CONNECT_URL, ANKI_SYNC, GRADE_TIMEOUT, LOG_LEVEL are valid"
+  ok config "PORT, ANKI_CONNECT_URL, ANKI_SYNC, GRADE_TIMEOUT, LOG_LEVEL, GRADER_PROVIDER are valid"
 fi
 
 need=$(awk '$1 == "go" { print $2; exit }' "$root/go.mod" 2>/dev/null)
@@ -285,18 +291,7 @@ if [ "$api_ok" = 1 ]; then
   fi
 fi
 
-if cb=$(command -v -- "$claude_bin" 2>/dev/null); then
-  cv=$("$cb" --version 2>/dev/null | head -n 1)
-  st=$("$cb" auth status --json 2>/dev/null)
-  if printf '%s' "$st" | grep -Eq '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
-    how=$(printf '%s' "$st" | sed -nE 's/.*"authMethod"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n 1)
-    ok claude "${cv:-unknown version} at $cb, logged in (${how:-unknown method})"
-  else
-    warn claude "${cv:-unknown version} at $cb, claude auth status says not logged in (an API key or a cloud provider may still work: the smoke test decides)"
-  fi
-else
-  fail claude "$claude_bin not found"
-fi
+check_grader "$grader_provider" "$claude_bin" "$codex_bin"
 
 pid="" can_tell=1
 if [ "$port_ok" = 0 ]; then
@@ -354,7 +349,7 @@ if [ -f "$data_dir/state.json" ]; then
   if have_python; then stage=$(pass_stage "$data_dir/state.json"); fi
   case $stage in
   confirmed) warn data "$data_dir holds a pass with confirmed grades: the server writes them to Anki on the first unlock (setup or login on the page)" ;;
-  checking) warn data "$data_dir holds a pass waiting for grading: the server runs claude -p on it on the first unlock (setup or login on the page)" ;;
+  checking) warn data "$data_dir holds a pass waiting for grading: the server runs the saved grading provider on it on the first unlock (setup or login on the page)" ;;
   idle) info data "$data_dir exists, no saved pass" ;;
   unreadable) warn data "$data_dir/state.json is not a version 1 state file: the server refuses to start with it" ;;
   unknown) warn data "$data_dir holds a saved pass, stage unknown without python3: confirmed grades in it go to Anki on the first unlock (setup or login on the page)" ;;

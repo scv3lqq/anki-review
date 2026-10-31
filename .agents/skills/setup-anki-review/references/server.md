@@ -31,6 +31,26 @@ turn to receive that input, retain the owned session IDs, or close the owned tun
 it when work resumes. Never leave an untracked process. If process sessions are unavailable,
 report that limitation instead of assuming a background-task API exists.
 
+## Grading provider
+
+The operating agent is independent of the grading provider. The kit installs Claude Code and
+Codex CLI 0.166.0; keep existing Claude token commands for Claude users. `S install` forwards
+`GRADER_PROVIDER`, `CODEX_MODEL` and existing Claude model settings. Local binary paths are
+not sent to the server; set custom server paths explicitly with `sudo env CODEX_BIN=...`
+or `CLAUDE_BIN=...` when running its installer. The environment
+selects only the first setup default; a saved encrypted provider choice wins. A changed
+`provider.sh` or `test-provider.sh` requires full server mode, like an installer/unit change.
+
+For Codex, the owner follows the exact [device session procedure](../../../../deploy/README.md#codex-device-session):
+private tmpfs `CODEX_HOME`, `-c 'cli_auth_credentials_store="file"' login --device-auth`,
+browser user code with device authentication enabled in ChatGPT security settings, secure
+SCP of the whole auth.json to a private local staging file, then the setup/settings file picker
+through the authenticated page/SSH tunnel. Never read auth, user codes or CLI login output.
+Delete only the named staging directories after successful save. Keep the dedicated session
+exclusive to this service. Refresh is resealed automatically; revoked refresh needs a new login.
+The macOS local staging file lives on disk until deleted; Linux call credentials require tmpfs.
+A restart leaves the app locked, and unlocking can resume a saved pass as described below.
+
 ## Settings and access
 
 - Missing `DEPLOY_SSH` (`user@host` of the deploy user: docker group, sudo) or `DEPLOY_SSH_PORT`
@@ -124,7 +144,7 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
    - No token is involved: install.sh takes none. An older deploy that kept the Claude token and the
      AnkiConnect key in `/etc/anki-review/env` gets them removed by this run, and says so in one
      line.
-8. Setup page (the owner, the Claude token and the AnkiConnect key are entered here, not in the
+8. Setup page (the owner, selected grading credentials and the AnkiConnect key are entered here, not in the
    shell). Skip when the latest `S status` shows `owner: unlocked`: run it after step 7, since a run
    that installed restarted the service and the step 3 result is stale (when step 7 was skipped,
    step 3 holds). An owner already set up gets the login form instead: the user logs in, and the
@@ -135,7 +155,7 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
      own process session (it forwards the host's service to
      <http://127.0.0.1:8768/>), and the user opens that URL.
    - Tell the user: "Fill in a login and a password of at least 12 characters (twice). Paste the
-     AnkiConnect key (Cmd+V). For the Claude token, run `claude setup-token` in a terminal on your
+     AnkiConnect key (Cmd+V). Select your grading provider. For Codex, import the dedicated auth.json using the procedure above. For Claude, run `claude setup-token` in a terminal on your
      computer, approve it in the browser and paste the `sk-ant-oat01-...` token it prints. Press
      Set up. I won't see any of it." Before that, explain the token source as in SKILL.md (the rules
      list how to get each one).
@@ -164,7 +184,7 @@ waits on its own.
 1. `make check` (or `go test ./...`), `make build-linux`, `S precheck update` (no service from this
    `DEPLOY_DIR`: mode `server`).
 2. `S kit-diff`: only `anki/` files differ: `S upload` and `S up` (no sudo). `install.sh`,
-   `smoke.sh` or the unit differ: mode `server` (one sudo password).
+   `smoke.sh`, `provider.sh`, `test-provider.sh` or the unit differ: mode `server` (one sudo password).
 3. `S status`: a pass in progress (see Pass in progress) is asked about first. A `sync:` line that
    differs from `DEPLOY_SYNC` (`sync: AnkiWeb` with `DEPLOY_SYNC=self-hosted`): Switching to
    self-hosted, not a plain update.

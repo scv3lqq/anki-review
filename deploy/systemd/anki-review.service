@@ -1,6 +1,6 @@
 # Installed by install.sh from the deploy kit, which fills in the deploy dir below.
 [Unit]
-Description=anki-review: grade typed Anki answers with Claude Code
+Description=anki-review: grade typed Anki answers with a selected grading CLI
 After=network-online.target docker.service
 Wants=network-online.target
 
@@ -13,6 +13,10 @@ WorkingDirectory=/var/lib/anki-review
 # Home of the service user: claude keeps its state and binary here, the only writable path.
 StateDirectory=anki-review
 StateDirectoryMode=0700
+RuntimeDirectory=anki-review
+RuntimeDirectoryMode=0700
+Environment=TMPDIR=/run/anki-review
+Environment=HOME=/var/lib/anki-review
 UMask=0077
 # Takes the binary staged in the deploy dir, so an update is a file swap plus a restart.
 ExecStartPre=-+/usr/bin/install -C -o root -g root -m 0755 @DEPLOY_DIR@/bin/anki-review /usr/local/bin/anki-review

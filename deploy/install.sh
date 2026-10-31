@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# Installs and starts the anki-review service from a deploy dir: system user, Claude Code for that
-# user, /etc/anki-review/env with the settings, the hardened unit, a polkit rule that lets the deploy
-# user restart the service without sudo, a smoke test of claude in the service sandbox, then enable
+# Installs and starts the anki-review service from a deploy dir: system user, both grading CLIs, /etc/anki-review/env with the settings, the hardened unit, a polkit rule that lets the deploy
+# user restart the service without sudo, CLI version checks in the service sandbox, then enable
 # --now. The Claude token and the AnkiConnect key are not handled here: the owner enters them on the
 # setup page, where the server seals them with the owner's password. Idempotent: rerun it to change a
-# setting or move Claude Code to CLAUDE_VERSION. A restart leaves the service locked until a login.
+# setting or move Claude Code to CLAUDE_VERSION. Codex stays pinned to the validated release. A restart leaves the service locked until a login.
 #
 # Usage: sudo /abs/path/install.sh [DEPLOY_DIR]
 #   DEPLOY_DIR: argument, else ANKI_REVIEW_DEPLOY_DIR, else <home of SUDO_USER>/anki-review-deploy.
 #   It holds this kit, bin/anki-review (linux/amd64) and anki/secrets/ankiconnect-key (from up.sh;
 #   only its presence is checked here, the Anki container reads it).
 # Settings, through `sudo env NAME=value ... install.sh`: PORT, KNOWLEDGE_DECKS, ANKI_CONNECT_URL
-# (or ANKI_CONNECT_PORT), ANKI_SYNC, CLAUDE_MODEL, GRADE_TIMEOUT, LOG_LEVEL go into the env file;
+# (or ANKI_CONNECT_PORT), ANKI_SYNC, CLAUDE_MODEL, CODEX_MODEL, GRADER_PROVIDER, GRADE_TIMEOUT,
+# LOG_LEVEL go into the env file; explicit CLAUDE_BIN/CODEX_BIN paths are retained and validated;
 # CLAUDE_VERSION=x.y.z|stable|latest overrides the pinned Claude Code version. AUTO_DEPLOY=on installs
 # anki-review-deploy.timer (autodeploy.sh, it needs DEPLOY_DIR/allowed_signers, git, jq and go),
 # AUTO_DEPLOY=off removes it, unset keeps it as it is.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/provider.sh"
 
 fail() { echo "install.sh: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || fail "run as root: sudo $0"
@@ -46,8 +47,12 @@ env_dir=/etc/anki-review
 env_file="$env_dir/env"
 polkit_rule=/etc/polkit-1/rules.d/50-anki-review.rules
 claude_version="${CLAUDE_VERSION:-2.1.310}"
-claude_bin="$home/.local/bin/claude"
-settings=(PORT KNOWLEDGE_DECKS ANKI_CONNECT_URL ANKI_SYNC CLAUDE_MODEL GRADE_TIMEOUT LOG_LEVEL)
+claude_default="$home/.local/bin/claude"
+claude_bin="$(provider_bin "${CLAUDE_BIN:-}" "$(provider_env_value "$env_file" CLAUDE_BIN)" "$home" claude)"
+codex_bin="$(provider_bin "${CODEX_BIN:-}" "$(provider_env_value "$env_file" CODEX_BIN)" "$home" codex)"
+provider="$(resolve_provider "${GRADER_PROVIDER:-}" "$(provider_env_value "$env_file" GRADER_PROVIDER)")" || fail "GRADER_PROVIDER must be claude or codex"
+# Saved provider choice is encrypted in vault.json; this is only the initial setup default.
+settings=(PORT KNOWLEDGE_DECKS ANKI_CONNECT_URL ANKI_SYNC CLAUDE_MODEL CODEX_MODEL GRADE_TIMEOUT LOG_LEVEL)
 auto_deploy="${AUTO_DEPLOY:-}"
 deploy_svc=anki-review-deploy
 deploy_script="$deploy_dir/autodeploy.sh"
@@ -55,7 +60,7 @@ deploy_signers="$deploy_dir/allowed_signers"
 deploy_unit_dst="/etc/systemd/system/$deploy_svc.service"
 deploy_timer_dst="/etc/systemd/system/$deploy_svc.timer"
 
-for f in "$bin_src" "$unit_src" "$smoke"; do
+for f in "$bin_src" "$unit_src" "$smoke" "$deploy_dir/provider.sh"; do
   [[ -f $f ]] || fail "missing $f"
 done
 [[ -f $key_file ]] || fail "missing $key_file: run $deploy_dir/anki/up.sh as $deploy_user first"
@@ -167,7 +172,10 @@ installed=""
 if [[ -x $claude_bin ]]; then
   installed="$(as_svc "$claude_bin" --version 2>/dev/null | awk '{print $1}' || true)"
 fi
-if [[ $installed == "$claude_version" ]]; then
+if [[ $claude_bin != "$claude_default" || -n ${CLAUDE_BIN:-} ]]; then
+  [[ $claude_bin == /* && -x $claude_bin ]] || fail "configured CLAUDE_BIN must be an executable absolute path"
+  as_svc "$claude_bin" --version >/dev/null || fail "configured CLAUDE_BIN cannot start as $svc"
+elif [[ $installed == "$claude_version" ]]; then
   echo "already installed"
 else
   # The official native installer checks the binary's sha256 against the release manifest.
@@ -176,6 +184,33 @@ else
   [[ -x $claude_bin ]] || fail "claude is not at $claude_bin after the install"
   as_svc "$claude_bin" --version
 fi
+
+echo "== Codex CLI 0.166.0 for $svc"
+codex_default="$(provider_bin '' '' "$home" codex)"
+if [[ $codex_bin != "$codex_default" || -n ${CODEX_BIN:-} ]]; then
+  [[ $codex_bin == /* && -x $codex_bin ]] || fail "configured CODEX_BIN must be an executable absolute path"
+else
+  installed="$(as_svc "$codex_bin" --version 2>/dev/null || true)"
+  if [[ $installed != 'codex-cli 0.166.0' ]]; then
+    # Preserve the complete package: codex needs its sibling exec server and resources.
+    package_dir="${codex_default%/bin/codex}"
+    stage="$(mktemp -d "$home/.codex-install.XXXXXX")"
+    trap 'rm -rf -- "$stage"' EXIT
+    curl -fsSL "$(codex_archive_url)" -o "$stage/package.tar.gz"
+    printf '%s  %s\n' "$(codex_archive_sha256)" "$stage/package.tar.gz" | sha256sum --check --status || fail "Codex archive checksum mismatch"
+    mkdir "$stage/package"
+    tar -xzf "$stage/package.tar.gz" -C "$stage/package"
+    [[ -x $stage/package/bin/codex && -x $stage/package/bin/codex-exec-server && -d $stage/package/resources ]] || fail "incomplete Codex package"
+    install -d -o root -g root -m 0755 "${package_dir%/*}"
+    rm -rf -- "$package_dir"
+    mv "$stage/package" "$package_dir"
+    chown -R root:root "$package_dir"
+    chmod -R go-w "$package_dir"
+    rm -rf -- "$stage"
+    trap - EXIT
+  fi
+fi
+[[ $(as_svc "$codex_bin" --version 2>/dev/null) == 'codex-cli 0.166.0' ]] || fail "CODEX_BIN must run codex-cli 0.166.0 as $svc"
 
 echo "== env $env_file"
 install -d -o root -g "$svc" -m 0750 "$env_dir"
@@ -192,6 +227,8 @@ KNOWLEDGE_DECKS=Tech,Career
 ANKI_CONNECT_URL=http://127.0.0.1:8765
 ANKI_SYNC=true
 CLAUDE_BIN=$claude_bin
+CODEX_BIN=$codex_bin
+GRADER_PROVIDER=$provider
 GRADE_TIMEOUT=5m
 LOG_LEVEL=info
 # Updates come from rerunning install.sh with CLAUDE_VERSION, not from claude itself.
@@ -200,6 +237,11 @@ EOF
   mv -f "$tmp" "$env_file"
 fi
 drop_secret_lines
+set_env_line GRADER_PROVIDER "$provider"
+set_env_line CLAUDE_BIN "$claude_bin"
+set_env_line CODEX_BIN "$codex_bin"
+set_env_line HOME "$home"
+set_env_line TMPDIR /run/anki-review
 for name in "${settings[@]}"; do
   if [[ -n ${!name:-} ]]; then
     set_env_line "$name" "${!name}"
@@ -314,8 +356,8 @@ printf '# written by install.sh, no secrets\nkit=2\npolkit=%s\nautodeploy=%s\n' 
 chmod 0644 "$tmp"
 mv -f "$tmp" "$deploy_dir/install-state"
 
-# No token exists yet at install time: the smoke test only proves that claude starts in the sandbox.
-echo "== smoke test: claude as $svc in the service sandbox"
+# No credentials are required: smoke checks only CLI versions under the service restrictions.
+echo "== smoke test: both grading CLIs as $svc in the service sandbox"
 version_re='[0-9]+\.[0-9]+\.[0-9]+'
 if ! out="$("$smoke" 2>&1)" || [[ ! $out =~ $version_re ]]; then
   echo "install.sh: smoke test failed, service not started. Output:" >&2
@@ -324,7 +366,7 @@ if ! out="$("$smoke" 2>&1)" || [[ ! $out =~ $version_re ]]; then
   printf '%s\n' "$out" >&2
   exit 1
 fi
-echo "claude version: $out"
+printf '%s\n' "$out"
 
 echo "== start $svc"
 systemctl enable --quiet "$svc"
