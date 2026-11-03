@@ -16,6 +16,12 @@ Poll that session with `write_stdin`, empty `chars`, and waits of at most 30 sec
 progress and user input between polls. For finite commands, a pending session is not a successful
 exit: check the final exit code and the helper's reported result before dependent steps.
 
+If a local script later streams input to SSH, redirect preliminary non-streaming SSH or
+helper probes with `</dev/null`; they can otherwise consume the pending script. Preserve
+stdin for intended script, archive and secret streams. For a multi-step remote backup or
+repair, require exit zero, expected artifacts and a unique terminal completion marker
+emitted after all postconditions pass. EOF alone can exit zero without doing the work.
+
 Start each tunnel in its own process session. Keep its ID separate from install or wait-helper
 IDs. Tunnels deliberately keep running: verify the expected local forwarding listener
 (`127.0.0.1:5901` for VNC, `127.0.0.1:8768` for the app) with a read-only local listener check,
@@ -30,6 +36,16 @@ an available question tool and continue independent work. If the runtime needs a
 turn to receive that input, retain the owned session IDs, or close the owned tunnel and reopen
 it when work resumes. Never leave an untracked process. If process sessions are unavailable,
 report that limitation instead of assuming a background-task API exists.
+
+## Runtime investigations
+
+Outside `check` mode, before an authorized isolated runtime experiment, record a compact
+contract in its brief: identical synthetic workload, image and resource limits, exact flags,
+completion/failure signals, memory metric, required API/VNC checks, isolation and cleanup.
+For WebEngine include renderer-termination signals, not just process exit or OOM status.
+Compare short runs first; extend only the selected candidate. Freeze the contract before
+expensive runs, revising it only when new evidence changes the question. Identify diagnostic
+flags and validate the exact shipping flags separately.
 
 ## Grading provider
 
@@ -97,6 +113,8 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
    Its output ends with `decks: N`, plus a hint line when N is 0 or 1. The line before it is
    `sync: AnkiWeb` or `sync: self-hosted on 127.0.0.1:8766, ...`.
 5. Sync login, only when N is 0 or 1 (an empty profile):
+   Before closing either login tunnel, complete the persisted-auth check in
+   [Sync login and VNC clipboard](#sync-login-and-vnc-clipboard).
    - AnkiWeb (`DEPLOY_SYNC` unset or `ankiweb`):
      - `S tunnel` in its own process session, `S vnc-password` (into the clipboard,
        never shown), `open vnc://127.0.0.1:5901` (Linux: a VNC viewer on `127.0.0.1:5901`).
@@ -115,10 +133,10 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
        Anki: Tools, Preferences, Syncing (the field is at the bottom of the AnkiWeb Account box): Log
        Out if it shows an account, set Self-hosted sync server to `http://sync:8766/`, close
        Preferences and click Sync. Tell me when the login form shows."
-     - Then `S sync-password` and tell the user: "In Screen Sharing turn on Edit, Use Shared Clipboard.
-       Log in as `anki` and paste the password with Ctrl+V (inside the session it is Ctrl, not Cmd; if
-       it still won't paste, paste it into a local note and type it). Choose **Download**: the server
-       has your collection. I watch for the decks."
+     - `S sync-password`, then follow [Sync login and VNC clipboard](#sync-login-and-vnc-clipboard).
+       If shared-clipboard controls are unavailable, use its temporary X11 helper before the handoff.
+       Tell the user: "Log in as `anki` and paste with Ctrl+V or the password field's Paste menu.
+       Choose **Download**: the server has your collection. I watch for the decks."
      - Run and poll `S wait-decks N` in a process session. When it prints the new count:
        `S clip-clear`, stop the owned tunnel session. Timeout: ask what Anki shows.
 6. Knowledge decks: `S deck-names` lists the server collection's top-level decks with the kind
@@ -278,6 +296,14 @@ The self-hosted account is `anki`, not the owner's app login or email. The inter
 `http://sync:8766/` belongs in remote Anki Preferences, Syncing; it is not a browser URL on
 the owner's computer. Check the endpoint before changing it. Report credential comparisons
 only as booleans, never values, hashes, process environments or auth snapshots.
+
+After GUI sync login, verify the active profile's saved `syncKey` presence in `prefs21.db`
+using read-only SQLite and restricted pickle decoding that rejects globals; output only a
+boolean. Do not guess the active profile when it is ambiguous. A successful sync may leave
+authentication only in memory. If unsaved, use the pinned version's native profile-save path,
+such as accepting Preferences or a clean shutdown, then verify again. Any restart still
+follows the saved-pass and backup rules. Prefer native persistence before adding autologin
+code; one missing stored key does not establish a need for repeated manual login.
 
 Try `S sync-password` and Screen Sharing's Edit, Use Shared Clipboard, then Ctrl+V inside
 Linux Anki. If sharing fails, place the password directly into the container's X11 clipboard
