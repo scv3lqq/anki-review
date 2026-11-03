@@ -280,7 +280,7 @@ your next signed commit on top.
   letters and digits (about 143 bits), in `DIR/anki/secrets/sync-password` (0600) and in the
   server container's environment.
 - The Anki container runs as a non-root user with a read-only root filesystem, no capabilities,
-  `no-new-privileges` and a 1 GB memory limit. The base image is pinned by digest, and the Anki and
+  `no-new-privileges` and a 2 GB memory limit. The base image is pinned by digest, and the Anki and
   AnkiConnect downloads by sha256.
 - The polkit rule grants one user three verbs on one unit: no other unit, no enable, disable or
   edit. The deploy user already owns `DIR`, whose binary the unit runs, and has sudo.

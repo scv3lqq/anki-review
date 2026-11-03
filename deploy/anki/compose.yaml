@@ -17,8 +17,8 @@ services:
     restart: unless-stopped
     # Anki saves and syncs on SIGTERM; give it time before the kill.
     stop_grace_period: 60s
-    mem_limit: 1g
-    memswap_limit: 1g
+    mem_limit: 2g
+    memswap_limit: 2g
     pids_limit: 1024
     shm_size: 256m
     read_only: true

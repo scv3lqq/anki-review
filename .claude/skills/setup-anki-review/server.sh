@@ -205,7 +205,7 @@ while [ ! -d "$parent" ]; do parent=$(dirname "$parent"); done
 free=$(df -Pk "$parent" | awk 'NR == 2 { print int($4 / 1024) }')
 if [ "${free:-0}" -lt 2048 ]; then line warn disk "${free} MB free under $parent: the image needs about 1.5 GB"; else line ok disk "${free} MB free"; fi
 mem=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)
-if [ "${mem:-0}" -lt 1200 ]; then line warn memory "${mem} MB available: Anki gets up to 1 GB"; else line ok memory "${mem} MB available"; fi
+if [ "${mem:-0}" -lt 2200 ]; then line warn memory "${mem} MB available: Anki gets up to 2 GB"; else line ok memory "${mem} MB available"; fi
 if [ "$mode" = new ]; then
   bad=""
   for u in https://github.com https://git.sr.ht https://claude.ai https://ankiweb.net https://api.anthropic.com; do
