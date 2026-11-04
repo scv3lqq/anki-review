@@ -62,7 +62,15 @@ func (c *Client) Decks(ctx context.Context) ([]domain.Deck, error) {
 	if err != nil {
 		return nil, err
 	}
-	names = slices.DeleteFunc(names, func(n string) bool { return n == defaultDeck })
+	if slices.Contains(names, defaultDeck) {
+		var ids []int64
+		if err := c.call(ctx, "findCards", map[string]any{"query": `"deck:Default"`}, &ids); err != nil {
+			return nil, fmt.Errorf("ankiconnect default deck: %w", err)
+		}
+		if len(ids) == 0 {
+			names = slices.DeleteFunc(names, func(n string) bool { return n == defaultDeck })
+		}
+	}
 	if len(names) == 0 {
 		return nil, nil
 	}
