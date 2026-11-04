@@ -271,10 +271,21 @@ func TestDueCards(t *testing.T) {
 }
 
 func TestDecks(t *testing.T) {
-	c, f := newFake(t, func(action string, _ json.RawMessage) (any, string) {
+	c, f := newFake(t, func(action string, params json.RawMessage) (any, string) {
 		switch action {
 		case "deckNames":
 			return []string{"Default", "Tech::Go", "English", "Tech", "Empty"}, ""
+		case "findCards":
+			var query struct {
+				Query string `json:"query"`
+			}
+			if err := json.Unmarshal(params, &query); err != nil {
+				t.Error(err)
+			}
+			if query.Query != `"deck:Default"` {
+				t.Errorf("unexpected Default presence query = %q", query.Query)
+			}
+			return []int64{}, ""
 		case "getDeckStats":
 			return map[string]any{
 				"1": map[string]any{"name": "Tech::Go", "new_count": 1, "learn_count": 0, "review_count": 2},
