@@ -68,6 +68,7 @@ func New(anki Anki, grader Grader, store Store, opts Options) (*Service, error) 
 	if opts.NewSession == nil {
 		opts.NewSession = func() string { return "a" + rand.Text()[:12] }
 	}
+	opts.KnowledgeDecks = slices.Clone(opts.KnowledgeDecks)
 	s := &Service{anki: anki, grader: grader, store: store, opts: opts, pass: pass}
 	s.gradeCtx, s.cancelGrade = context.WithCancel(context.Background())
 
@@ -102,12 +103,15 @@ func (s *Service) Close(ctx context.Context) error {
 
 // Decks lists decks with something due.
 func (s *Service) Decks(ctx context.Context) ([]domain.Deck, error) {
+	s.mu.Lock()
+	knowledgeDecks := slices.Clone(s.opts.KnowledgeDecks)
+	s.mu.Unlock()
 	decks, err := s.anki.Decks(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("review: decks: %w", err)
 	}
 	for i := range decks {
-		decks[i].Kind = domain.KindOf(decks[i].Name, s.opts.KnowledgeDecks)
+		decks[i].Kind = domain.KindOf(decks[i].Name, knowledgeDecks)
 	}
 	return decks, nil
 }
@@ -274,6 +278,7 @@ func (s *Service) take(ctx context.Context, from *domain.Pass, deck string, coun
 		return conflict(CodeSent, "cards are already being taken")
 	}
 	s.taking = true
+	knowledgeDecks := slices.Clone(s.opts.KnowledgeDecks)
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -306,7 +311,7 @@ func (s *Service) take(ctx context.Context, from *domain.Pass, deck string, coun
 	s.pass = &domain.Pass{
 		Session:   s.opts.NewSession(),
 		Deck:      deck,
-		Kind:      domain.KindOf(deck, s.opts.KnowledgeDecks),
+		Kind:      domain.KindOf(deck, knowledgeDecks),
 		Limit:     limit,
 		CreatedAt: s.opts.Now(),
 		Items:     items,
@@ -340,6 +345,10 @@ func (s *Service) dueItems(ctx context.Context, deck string, limit int) ([]domai
 func (s *Service) startGradingLocked() {
 	p := s.pass
 	kind, items, answers := p.Kind, p.Answered(), p.AnswerMap()
+	// Rendered card content is for the browser only; grader ports receive plain text.
+	for i := range items {
+		items[i].QuestionHTML, items[i].BackHTML = "", ""
+	}
 	s.grading = true
 	s.wg.Add(1)
 	go func() {
@@ -441,4 +450,41 @@ func countTrue(ok []bool) int {
 		}
 	}
 	return n
+}
+
+// WithCollection serializes collection changes with review mutations and permits only idle/written
+// passes. The callback runs under the service mutex and must not call other Service methods.
+func (s *Service) WithCollection(ctx context.Context, change func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("review: collection: %w", err)
+	}
+	if s.taking || s.grading || s.applying {
+		return conflict(CodeBusy, "wait: a review operation is in progress")
+	}
+	if stage := s.pass.Stage(); stage != domain.StageIdle && stage != domain.StageWritten {
+		return conflict(CodeBusy, "a batch is already in progress")
+	}
+	if err := change(); err != nil {
+		return fmt.Errorf("review: collection: %w", err)
+	}
+	return nil
+}
+
+// SetKnowledgeDecks changes the classification for subsequent passes, copying the caller's slice.
+func (s *Service) SetKnowledgeDecks(decks []string) error {
+	return s.UpdateKnowledgeDecks(context.Background(), decks, func() error { return nil })
+}
+
+// UpdateKnowledgeDecks persists preferences before publishing them, under the collection lock.
+// The save callback must not call Service methods.
+func (s *Service) UpdateKnowledgeDecks(ctx context.Context, decks []string, save func() error) error {
+	return s.WithCollection(ctx, func() error {
+		if err := save(); err != nil {
+			return err
+		}
+		s.opts.KnowledgeDecks = slices.Clone(decks)
+		return nil
+	})
 }

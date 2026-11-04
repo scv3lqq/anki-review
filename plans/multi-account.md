@@ -64,6 +64,11 @@ A crash with an existing vault must remain recoverable using the chosen login an
 password; do not delete that vault. Retry with the same invitation/login completes
 or offers login; never reseal an existing vault with a new password. Persistence
 errors fail closed; do not report successful registration before durable commit.
+Factory.Remove refuses to delete any existing vault using accounts.ErrHasVault.
+Before a subsequent Invite/Register, reap expired pending reservations with a bounded
+5-second cleanup context outside metadata lock: successful Remove releases slot;
+ErrHasVault publishes ready/consumes invite and keeps normal Login recoverable;
+unavailable cleanup retains the tracked bounded reservation for a later retry.
 
 ### Provisioner contract
 A separate root-owned daemon binary `anki-review-provisioner` owns Docker access.
@@ -121,6 +126,15 @@ through Anki. A failed import does not reset or change the saved review pass.
 guest defaults empty; sync always false for guests. Save only idle/written and apply
 to subsequent passes. Settings may never change a managed account's Anki key/URL.
 
+### Adapter symbols (T4 producer, T5 consumer)
+`apkg.MaxBytes` is exported 8 MiB limit; `apkg.Validate([]byte) error` validates
+legacy-compatible packages. `ankiconnect.Client.ImportPackage(context.Context,[]byte)
+error` validates/stages/imports/cleans; `Media(context.Context,string) ([]byte,error)`
+retrieves bounded bytes. `cardrender.Document(raw string) string` emits sanitized
+standalone document; `cardrender.MediaName(string) bool` validates shared basename
+rules. Sanitized Document has CSP meta defense-in-depth; HTTP CSP and sandbox remain
+mandatory. Dependency is golang.org/x/net/html v0.62.0 (official docs checked by T4).
+
 ### HTML/media contract
 Add `QuestionHTML`/`BackHTML` optional fields to domain.Item, persist with pass, and
 `question_html` to CardView/ResultItem plus `back_html` to graded ResultItem only.
@@ -131,6 +145,10 @@ result. Use a script-disabled sandboxed iframe with same-origin media permitted,
 strict document CSP (default none, inline styles, local image/font/audio/video only,
 no scripts/forms/connections/navigation), no parent DOM access via script. Media
 references become authenticated `/api/media/<escaped-basename>`; no filesystem paths.
+All Anki JSON responses are bounded at 24 MiB before decoding, detect overflow and
+trailing data, and return ErrAnki on violation. A card's combined question/answer HTML
+is at most 256 KiB and CSS at most 64 KiB; oversized cards fail with an explicit safe
+size error, without silent truncation. These also bound saved-pass amplification.
 Media retrieval bounds decoded data (16 MiB), validates basename and returns safe
 content types, nosniff and private/no-store; never expose auth snapshots.
 Use a real HTML parser for sanitization/rewrite, strip active elements/attributes,
@@ -145,7 +163,13 @@ wait-setup/status explicitly report the mode without waiting for public unlock d
 A maintenance restart stops HTTP first, inspects every account saved state locally
 through an administrator-only stage-summary helper, preserves backups and leaves
 all accounts locked. Checking/confirmed passes require an explicit owner decision
-before any account is asked to unlock. No automatic login or grades during setup.
+before any account is asked to unlock. No automatic login or grades during setup. Multi-account provisioning binary updates
+are a separate administrator install: build-provisioner-linux, kit upload, run
+install-multi-account.sh to stop/replace/restart only the daemon, then HTTP maintenance
+restart as needed. Auto-deploy never advances a multi-account deployment, even if
+only internal/provisioner changed. Roll back both binaries together and retain
+registry/backing filesystems. Both ankiconnect_key and vnc_password secret files
+are mandatory for the existing image entrypoint, although VNC is not published.
 Provide deploy/check-passes.py with offline fixtures; no private data in its output.
 
 ### Page contract
@@ -155,7 +179,10 @@ accounts. Owner settings shows invite creation and link copy. Idle page/settings
 has .apkg import, upload errors and older-compatible export instruction. Account
 preferences persist server-side. All browser draft/preferences keys include opaque
 account ID; clear in-memory review/auth state on logout/account switch and fence
-asynchronous replies from prior account. No imported HTML enters parent innerHTML.
+asynchronous replies from prior account. No imported HTML enters parent innerHTML. Main page CSP must permit frame-src self.
+Media endpoints never render uploaded HTML as active same-origin documents: unknown,
+HTML/JS types are attachment/octet-stream; SVG documents retain sandbox/script-none
+CSP. All media responses use nosniff/private no-store and bounded retrieval.
 
 ## Acceptance criteria
 A1. `go test -race ./internal/app -run MultiAccount -count=1`: two concurrent cookie
@@ -186,7 +213,7 @@ account-aware backups/restore/cleanup, separate privileged daemon and rollback.
 Run full gates serially before every commit: `make check`, `make build`,
 `make build-linux`; `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath
 -buildvcs=false -o bin/anki-review-provisioner-linux-amd64 ./cmd/anki-review-provisioner`
-after that command exists; `node --check web/app.js`; `git diff --check`.
+after that command exists; `node --check web/app.js`; `node --test web/app_test.cjs` after T6 exists; `git diff --check`.
 Baseline make check PASS, saved as base-check.log. New criterion packages/commands
 are absent on base; existing app/owner/http/repository suites pass through make check.
 Every task records its focused pre-source RED test command/log then GREEN evidence.
@@ -204,7 +231,9 @@ Own internal/repository/claude/grader.go, new isolation_test.go,
 internal/usecase/owner/owner.go and new strict_test.go; internal/repository/vault/vault.go
 and its metadata tests. Add `claude.Grader.Isolated bool`; isolated exec requires token,
 uses private temp HOME/work/config/TMPDIR and allowlisted env like Codex, cleans up,
-uses bounded output and sanitized generic failure diagnostics. Add
+uses bounded output and sanitized generic failure diagnostics. Isolated subprocess
+execution is serialized per Grader with context-aware acquisition to bound concurrent
+settings checks and grading to one CLI process per account. Add
 `owner.Options.RequireCredentials bool`; strict setup/update reject empty selected
 Claude token, status connected reflects token, grader still fails closed after legacy
 unlock with empty token. Add `vault.User() (string,error)` reads bounded validated
@@ -236,7 +265,11 @@ corresponding test fails. Client uses finite deadlines, bounded response, Unix o
 Close func(context.Context) error. `accounts.Factory` has Open(context.Context,Record)
 (*Runtime,error), Remove(context.Context,string) error. `accounts.Store` has
 Load() (State,error), Save(State) error. Options has MaxAccounts int, Now func()time.Time,
-RootUser string. `accounts.New(Store,Factory,*Runtime,Options) (*Manager,error)`.
+RootUser string. Account sessions have a manager-owned token index with at most 64
+sessions per account, owner.SessionTTL expiry, expired/invalid eviction and underlying
+Auth.Logout on eviction outside metadata mutex. Resolve calls Authorized only for the
+selected token's account, never scans/blocks on a different account unlocking.
+`accounts.New(Store,Factory,*Runtime,Options) (*Manager,error)`.
 Manager methods: Resolve(token string) (Record,*Runtime,bool),
 Setup(context.Context,client string,in owner.SetupInput) (string,error),
 Login(context.Context,client,user,password string) (string,error),
@@ -262,8 +295,11 @@ State types live here so accountstore imports inward. Options include Now, MaxAc
 RootUser and explicit root Runtime; pending records never replace owner files.
 Use global bounded throttling and password work semaphore. Gates: go test -race
 ./internal/usecase/accounts ./internal/repository/accountstore;
-golangci-lint run both. Mutation: skip invitation Used/expiry check or resolve service
-by caller supplied ID; regression tests fail. No app/http changes in this task.
+golangci-lint run both. Mutation: bypass the single-use boundary by removing Used from its primary guard
+and changing its secondary AccountID guard to `invite.AccountID != "" && !invite.Used`;
+separately skip expiry. Both build and fail TestInvitationsAuthorizationExpiryAndSingleUse.
+Removing only Used is equivalent due the independent AccountID protection. Session
+isolation tests reject resolving service by caller-supplied ID. No app/http changes in this task.
 
 ### T4: Safe package and rendered-card adapters
 Own internal/repository/apkg/**, internal/repository/ankiconnect/**,
@@ -286,9 +322,73 @@ properties/plain text and withheld back HTML. Gates: go test -race
 ./internal/usecase/review; golangci-lint run same packages.
 Mutations: ignore media mapping traversal or expose ungraded BackHTML; tests fail.
 
+### HTTP adapter API (T5 producer, T6 consumer)
+Preserve httpapi.New signature. Add httpapi.NewWithOptions with trailing Options;
+Options has AccountID, MultiAccount, Managed, IsOwner metadata and Collection port (AccountID string; the other metadata bool).
+Collection interface has Import(context.Context,[]byte) error,
+Media(context.Context,string) ([]byte,error), Preferences() ([]string,error),
+SavePreferences(context.Context,[]string) error. Existing Service interface stays
+unchanged; app collection adapter owns concrete review.Service.WithCollection calls.
+NewWithOptions adds import/preferences/render/media routes and session metadata;
+legacy New wraps it with zero options. Actual App supplies Collection in all modes.
+
+Add httpapi.Directory interface: Resolve(token string) (http.Handler,bool),
+PublicState() string, Setup(context.Context,string,owner.SetupInput) (string,error),
+Login(context.Context,string,string,string) (string,error),
+Invite(string) (accounts.InviteResult,error),
+Register(context.Context,string,string,owner.SetupInput) (string,error).
+httpapi.NewMulti(directory Directory, root http.Handler) http.Handler wraps the
+existing root handler. Handle global setup/login/register/invitations and anonymous
+session directly; authenticated session and all other APIs delegate only to the
+resolved account handler. Assets delegate root. Anonymous session returns only
+state and multi_account (optionally unlocked:false), never owner progress. Missing
+or invalid study session gets 401. Owner invite route requires live session then
+owner role; guest gets403. Registration sets ordinary session cookie. Multi wrapper
+and child handlers share host/content/preflight guards; no account query routing.
+
+app.New factors account construction internally (one owner/vault/store/graders/lazy
+service per account), uses strict/isolated flags for every multi account. Root path,
+AnkiURL and sync defaults unchanged. Factory Open obtains broker endpoint/key before
+constructing guest (data/accounts/id, syncfalse, empty knowledge defaults) and caches
+only that ID. Remove checks on-disk vault.Exists before any broker/storage removal,
+returns accounts.ErrHasVault if present; successful service Close removes cached
+factory runtime so a future Open builds fresh Auth. Manager controls session lookup
+and close; account handler metadata is immutable, never shared global mutable state.
+No Ensure at root startup or anonymous requests, so broker outage does not block
+owner. NewWithOptions root receives account_id=owner even in legacy mode.
+
+Import guard accepts only exact octet-stream + X-Anki-Import:1, no CORS; if Origin
+present reject Sec-Fetch-Site cross-site/same-site. Sec-Fetch-Site same-origin is a
+browser-controlled same-origin proof behind a proxy that rewrites Host. Otherwise
+compare Origin scheme/host against trusted request scheme/Host (or overwritten
+X-Forwarded-Host); malformed Origin rejects. Do not require public Origin to equal
+internal loopback proxy Host when browser Fetch Metadata proves same-origin.
+
+Render query requires this account's current pass session, integer N and side.
+Question uses CardsView matching session/N. Back uses ResultsView matching session/N
+and non-skipped graded item. Wrong session409 session, unknownN404, invalidside400.
+Legacy pass without HTML falls back to escaped plain text. Apply Document sanitizer,
+text/html, no-store, and CSP sandbox allow-same-origin; default/script/connect none,
+styles inline, img/media/font self, base/form none, frame-ancestors self. No scripts.
+Media basename validated, lookup only selected endpoint; safe MIME types for images,
+audio/video/CSS/fonts, unknown/HTML/JS attachment octetstream and script-none sandbox
+CSP on SVG/direct navigation. Guard main CSP permits frame-src self.
+
+For isolated app tests, fakeclaude.Use environment vars are intentionally stripped;
+use an explicit test wrapper like fakecodex.Use to inject fixture-only fake vars,
+never weaken production env allowlist. New multi broker fixture uses short /tmp Unix
+socket paths, loopback ports >=19000 and 64-hex keys (client validates these). Keep
+independent token audit fixtures per account without global env races.
+
 ### T5: Account HTTP and app integration (depends T1,T2,T3,T4)
 Own internal/app/**, internal/handler/httpapi/**, internal/config/**,
-internal/testutil/fakeanki/**. Preserve existing New API/legacy tests, add opt-in
+internal/testutil/fakeanki/**, new internal/repository/filestore/preferences.go and
+preferences_test.go. Preferences adapter exports LoadPreferences(dir string, defaults
+[]string) ([]string,error) and SavePreferences(dir string, decks []string) error,
+0600 atomic/fsynced preferences.json per-account; missing file copies defaults.
+Validate max64 nonempty deck names <=256 bytes, no controls, deduplicate, accept
+explicit empty array; missing knowledge_decks is a 400. No user path input.
+Preserve existing New API/legacy tests, add opt-in
 multi-account server and an HTTP directory adapter in app to keep use cases inward.
 Reuse each account's existing handler/service/auth runtime; multi HTTP entrypoint
 handles account selection, global login/register/invitations and sanitized session
@@ -302,12 +402,14 @@ fake Anki servers/CLIs, concurrent same card IDs, forbidden owner-only route,
 invitation reuse and failures, own tokens and Codex refresh, isolated settings/media,
 import failure/pass preservation and restart with pending/staged passes. Gates:
 go test -race ./internal/app ./internal/handler/httpapi ./internal/config
-./internal/testutil/fakeanki; golangci-lint run same packages.
+./internal/testutil/fakeanki ./internal/repository/filestore; golangci-lint run same packages.
 Mutations: route B to root service, accept guest key update or resolve render by
 foreign pass; corresponding test fails. No real services, credentials or collections.
 
-### T6: Account page (depends T5 contracts)
-Own web/app.js, web/index.html, web/style.css and new web focused test script if
+### T6: Account page (depends frozen HTTP contract, independent of T5 source)
+The Shared HTTP/HTML contracts are frozen; T6 can execute in parallel before T5
+implementation, without changing backend files.
+Own web/app.js, web/index.html, web/style.css and new web/app_test.cjs if
 needed. Follow Page contract, use existing provider controls and English page style.
 Use iframe pointing at authenticated render route, sandbox allow-same-origin with
 no scripts; strict response CSP is server-owned. Parent never inserts imported HTML.
@@ -317,10 +419,26 @@ where meaningful; node --check plus DOM smoke with fake server. Gates:
 node --check web/app.js; focused node tests; go test ./web.
 Mutation: remove account ID from draft key, focused test fails.
 
-### T7: Deployment and documentation (depends T2,T5,T6)
+### Stage-summary helper contract (T7)
+`python3 deploy/check-passes.py DATA_DIR` runs locally as the data owner/admin, never
+contacts HTTP/Anki. Print aggregate stage counts only (idle,input,checking,results,
+confirmed,written), never usernames/cards/answers/credentials. Include owner and
+all opaque account directories, detect orphan account states as well. Missing state
+is idle. Exit0 only when all idle/written, exit2 on any active pass, exit1 on malformed,
+oversized (>64 MiB), symlinked or unsafe data. No state changes. Offline fixtures
+cover both users, active/confirmed, corrupt JSON, symlink and no secret in output.
+Autodeploy fixture must prove multi_account:true holds regardless of unlocked/stage
+or unchanged HTTP binary. Both ordinary and sudo restart helper paths must refuse
+multi mode; wait-setup returns clear mode status rather than polling. Build/transport
+of both binaries is explicit and account status remains private.
+
+### T7: Deployment and documentation (depends frozen contracts, independent files)
+The installer/HTTP/page contracts are frozen. T7 may execute alongside T5/T6 once
+its exact prose appendix is checked against current T2 flags. Any producer change
+that invalidates docs requires a new exact new-fence correction before dispatch.
 Own README.md, deploy/README.md, .env.example, Makefile,
 deploy/autodeploy.sh, deploy/install.sh, deploy/test-provider.sh,
-deploy/check-passes.py and its offline fixtures,
+deploy/check-passes.py and its offline fixtures, .github/workflows/ci.yml for check-web,
 .agents/skills/setup-anki-review/** and .claude/skills/setup-anki-review/** only for
 required kit transport/runtime instructions. Keep independent skill sources separate.
 Use canonical plan_edits helper to snapshot old prose before changing it and apply
@@ -356,3 +474,93 @@ Independent plan-reviewer reviews committed task contents with hashes and scoped
 commands/mutations. Acceptance-validator runs final full gates and all criteria,
 receives every review finding and private gate log paths. Max five fix iterations;
 stop on repeated finding three times or unavailable required gate, reporting limits.
+
+## T7 exact prose appendix
+
+Before T7 implementation, apply the exact sidecar edits below against base e576a83
+with the canonical plan_edits helper, then run the matching check command. Each
+sidecar owns only its named file; do not merge E-blocks across files.
+
+- README.md: plans/multi-account-doc-edits/READMEmd.md
+- deploy/README.md: plans/multi-account-doc-edits/deploy_READMEmd.md
+- .agents/skills/setup-anki-review/SKILL.md: plans/multi-account-doc-edits/agents_skills_setup-anki-review_SKILLmd.md
+- .claude/skills/setup-anki-review/SKILL.md: plans/multi-account-doc-edits/claude_skills_setup-anki-review_SKILLmd.md
+- .agents/skills/setup-anki-review/references/server.md: plans/multi-account-doc-edits/agents_skills_setup-anki-review_references_servermd.md
+- .claude/skills/setup-anki-review/references/server.md: plans/multi-account-doc-edits/claude_skills_setup-anki-review_references_servermd.md
+
+These are independent skill sources, not instruction aliases. Preserve their existing
+differences. T7 may add config/script/tool behavior only within its explicit ownership.
+The appendix requires final verification against T2 installer flags and T5/T6 user
+contracts before dispatch. Correct any factual mismatch in the new fences first.
+
+## Pre-commit independent review corrections
+
+T1 cleanup must handle mode changes made by its own subprocess inside the private
+runtime tree without following symlinks. Restore directory permissions before
+descending, remove the owned tree, and fail closed with sanitized cleanup error if
+removal still fails; discard otherwise successful results. A fake CLI writes a
+fixture credential and chmods its private config to 000: test proves no credential
+file remains and no silent cleanup failure. Non-timeout fake-process probes use a
+10-second budget; the cancellation-wait test keeps its 100ms behavior assertion.
+
+T3 cleanupExpired must propagate registry Save failures (no successful Invite or
+Register after failed durable cleanup), retaining consistent retryable metadata.
+forgetRemoved must not silently swallow Runtime.Close failure or release its slot
+as successful cleanup. Return ErrUnavailable wrapping the failure, keep reservation
+tracked for retry and clear Auth only when background close has completed. After acquiring slot.open,
+revalidate that the manager still tracks the same slot/record and is not closed
+before factory.Open; a stale waiter cannot create an untracked runtime after cleanup. Regression
+tests inject Save/Close failures and require a non-successful operation plus bounded
+retained reservation; no new invitation may report success after that failure.
+
+T3 Open must re-check the same runtime slot and an existing registry record after
+acquiring slot.open, before returning a cached runtime or calling Factory.Open.
+Removed or replaced slots and a closed manager fail with ErrUnavailable, never
+creating untracked resources. A deterministic blocked-open/expired-cleanup regression
+proves this schedule; rerun scoped accounts/accountstore race tests and lint.
+
+T3 post-write durability recovery: add owner.UseCase.RefreshVault() error (metadata
+only, setupMu then mu, read Vault.Exists, monotonically set hasVault=true when an
+envelope exists, never decrypt/reseal/change secrets). When Factory.Remove returns
+ErrHasVault after a failed Setup, refresh cached Auth before publishing or retrying.
+Propagate Exists/refresh failure. A persisted-but-error-returning Seal must never be
+called again with another password; immediate registration retry authenticates the
+original password, and expiry recovery permits normal Login without restart.
+T3 exclusive scope extends to owner.go and new refresh_test.go for this fix; T1
+writer has finished those files. Tests inject post-write Seal failure and Exists
+failure, pin one seal and unchanged original password.
+
+T2 reboot safety correction: managed guests use Docker --restart=no. The daemon
+reconciles durable reservations at startup and every 30 seconds, verifying/mounting
+the quota filesystem before starting/restarting a container. Service.Reconcile(ctx)
+snapshots bounded IDs and calls Ensure sequentially with sanitized aggregated errors;
+main runs it in a cancellation-aware background loop while listening on the socket.
+A host reboot must never let Docker bind the unmounted fallback directory and start
+Anki outside its quota. Fake tests prove mount-before-start and no start on mount
+failure; existing container restart policy is verified/migrated safely, never silently
+accepted as automatic. No guest runtime can start without verified quota storage.
+
+T7 workflow recheck corrections: updates preserve all four existing daemon settings
+explicitly (the installer now retains saved values and explicit overrides win); offline backup preserves complete
+per-ID reservation.json/filesystem.json/storage.img/ankiconnect_key/vnc_password after
+verified unmount+loop detach; rollback stops only selected labelled guest containers
+without DELETE. Exact prose new fences now contain these contracts.
+
+T3 root durability guard: accounts.Manager.Setup also calls metadata-only RefreshVault
+before choosing setup, so a post-rename durability failure cannot reseal the owner's
+existing vault on retry in multi-account mode. Legacy owner.Setup remains unchanged.
+
+T7 ordinary install guard: deploy/install.sh must detect nonempty ACCOUNT_SOCKET
+in explicit settings or existing service env before any install/restart mutation and
+fail with the multi-account maintenance instruction. It must not silently restart
+a multi-account HTTP service. Add an offline fixture proving the guard precedes
+mutation. Multi mode installation is separate, after ordinary owner installation.
+
+T7 build contract: make build-linux depends on build-provisioner-linux so existing
+setup references produce the complete two-binary kit without changing their commands.
+
+T5 managed-error privacy: if registration/setup for a managed guest hits owner.FieldError
+field anki_key, map it to503 with "Your collection is temporarily unavailable. Try
+again." and no infrastructure field/endpoint/key/config names. Runtime/provisioning
+errors return generic account-unavailable messages; only opaque account IDs appear
+in operation logs. Owner legacy setup/settings keep existing key form compatibility.

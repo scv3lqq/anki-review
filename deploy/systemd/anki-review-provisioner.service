@@ -1,0 +1,25 @@
+[Unit]
+Description=Privileged bounded Anki guest runtime provisioner
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/anki-review-provisioner.conf
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/libexec/anki-review-provisioner --root /var/lib/anki-review-provisioner --socket /run/anki-review-provisioner/control.sock --group anki-review --max-guests ${MAX_GUESTS} --storage-bytes ${STORAGE_BYTES} --uid ${ANKI_UID} --gid ${ANKI_GID}
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+# Mounts must be in the host namespace so the independent Docker daemon sees ext4 storage.
+# ProtectSystem, PrivateTmp, PrivateDevices, and filesystem namespace restrictions are unsafe here.
+PrivateMounts=no
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

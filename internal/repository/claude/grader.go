@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,8 +21,10 @@ import (
 )
 
 const (
-	tailBytes = 300
-	waitDelay = 10 * time.Second
+	tailBytes             = 300
+	maxOutputBytes        = 2 * 1024 * 1024
+	waitDelay             = 10 * time.Second
+	privateCleanupTimeout = 5 * time.Second
 	// a check is one tiny call; it fails in seconds unless the network hangs
 	checkTimeout = 90 * time.Second
 	checkPrompt  = "Reply with the single word OK"
@@ -31,13 +36,17 @@ var errIncomplete = grading.ErrIncomplete
 
 // Grader runs `claude -p` once per pass.
 type Grader struct {
-	Bin     string
-	Model   string
-	Timeout time.Duration
+	// Isolated requires an explicit credential and gives every CLI call private directories and environment.
+	Isolated    bool
+	processOnce sync.Once
+	processGate chan struct{}
+	Bin         string
+	Model       string
+	Timeout     time.Duration
 	// Dir is the working directory of claude: an empty data dir, so no project files are around.
 	Dir string
 	// Token returns the owner's Claude token, read on every call. Nil or "" means claude uses the
-	// login of the account the server runs as.
+	// login of the account the server runs as, unless Isolated requires an explicit token.
 	Token func() string
 }
 
@@ -90,24 +99,33 @@ func (g *Grader) run(parent context.Context, prompt string) (*gradesOutput, erro
 	}
 	var res cliResult
 	if err := json.Unmarshal(p.stdout, &res); err != nil {
+		if g.Isolated {
+			return nil, errors.New("claude: no readable answer")
+		}
 		if p.exit != nil {
 			return nil, fmt.Errorf("claude: %w: %s", p.exit, tail(p.text))
 		}
 		return nil, fmt.Errorf("claude: decode output: %w", err)
 	}
 	if res.IsError || len(res.StructuredOutput) == 0 {
+		if g.Isolated {
+			return nil, isolatedFailure(res.Result)
+		}
 		return nil, fmt.Errorf("claude: %s: %s", res.Subtype, tail(redact(res.Result, token)))
 	}
 	var out gradesOutput
 	if err := json.Unmarshal(res.StructuredOutput, &out); err != nil {
+		if g.Isolated {
+			return nil, fmt.Errorf("claude: invalid grading answer: %w", errIncomplete)
+		}
 		return nil, fmt.Errorf("%w: %w", errIncomplete, err)
 	}
 	return &out, nil
 }
 
 // Check asks claude once with token, as a settings change does before it saves the token. An empty
-// token checks the login of the account the server runs as. The error text is shown to the owner
-// as it is: claude's own message, without the token.
+// token checks the host login only in legacy mode. Isolated mode requires a token and exposes
+// generic failure categories, because CLI diagnostics may contain private account information.
 func (g *Grader) Check(ctx context.Context, token string) error {
 	args := []string{"-p", "--safe-mode", "--tools", "", "--no-session-persistence", "--output-format", "json"}
 	if g.Model != "" {
@@ -119,18 +137,27 @@ func (g *Grader) Check(ctx context.Context, token string) error {
 	}
 	var res cliResult
 	if err := json.Unmarshal(p.stdout, &res); err != nil {
+		if g.Isolated {
+			return errors.New("claude: no readable answer")
+		}
 		if p.exit != nil {
 			return fmt.Errorf("%w: %s", p.exit, tail(p.text))
 		}
 		return errors.New("no readable answer")
 	}
 	if res.IsError {
+		if g.Isolated {
+			return isolatedFailure(res.Result)
+		}
 		return errors.New(checkMessage(res.Result, token))
 	}
 	if p.exit != nil {
 		return fmt.Errorf("%w: %s", p.exit, tail(p.text))
 	}
 	if strings.TrimRight(strings.TrimSpace(res.Result), ".!") != "OK" {
+		if g.Isolated {
+			return errors.New("claude: unexpected answer")
+		}
 		return errors.New("unexpected answer: " + checkMessage(res.Result, token))
 	}
 	return nil
@@ -148,15 +175,50 @@ type proc struct {
 // exec runs claude once. The prompt goes through stdin and the token only into the child's env: neither
 // is in argv, which any local user can read in `ps`. A timeout or a canceled parent is an error; a
 // non-zero exit is reported in proc.exit, because claude may still print an answer before it fails.
-func (g *Grader) exec(parent context.Context, timeout time.Duration, args []string, prompt, token string) (proc, error) {
+func (g *Grader) exec(parent context.Context, timeout time.Duration, args []string, prompt, token string) (result proc, runError error) {
+	if g.Isolated && strings.TrimSpace(token) == "" {
+		return proc{}, errors.New("claude: explicit credential required")
+	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	if g.Isolated {
+		g.processOnce.Do(func() { g.processGate = make(chan struct{}, 1) })
+		select {
+		case g.processGate <- struct{}{}:
+			defer func() { <-g.processGate }()
+		case <-ctx.Done():
+			return proc{}, fmt.Errorf("claude: waiting for isolated CLI: %w", ctx.Err())
+		}
+	}
 
 	cmd := exec.CommandContext(ctx, g.Bin, args...) //nolint:gosec // G204: the binary comes from the owner's config
 	cmd.Dir = g.Dir
 	cmd.Env = childEnv(os.Environ(), token)
+	if g.Isolated {
+		root, err := os.MkdirTemp("", "anki-review-claude-*")
+		if err != nil {
+			return proc{}, errors.New("claude: cannot create private environment")
+		}
+		defer func(root string) {
+			if cleanupErr := removePrivateEnvironment(root); cleanupErr != nil {
+				result = proc{}
+				runError = errors.New("claude: could not remove private environment")
+			}
+		}(root)
+		root, err = filepath.EvalSymlinks(root)
+		if err != nil {
+			return proc{}, errors.New("claude: cannot resolve private environment")
+		}
+		for _, name := range []string{"home", "work", "config", "tmp", "cache"} {
+			if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+				return proc{}, errors.New("claude: cannot create private environment")
+			}
+		}
+		cmd.Dir = filepath.Join(root, "work")
+		cmd.Env = isolatedEnv(os.Environ(), root, token)
+	}
 	cmd.Stdin = strings.NewReader(prompt)
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr boundedBuffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = waitDelay
@@ -168,7 +230,13 @@ func (g *Grader) exec(parent context.Context, timeout time.Duration, args []stri
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return proc{}, fmt.Errorf("claude: no answer in %s", timeout)
 	}
-	return proc{stdout: stdout.Bytes(), text: redact(stderr.String()+stdout.String(), token), exit: runErr}, nil
+	if stdout.overflow || stderr.overflow {
+		return proc{}, errors.New("claude: output exceeds safe size limit")
+	}
+	if g.Isolated && runErr != nil {
+		return proc{}, isolatedFailure(stderr.buffer.String() + stdout.buffer.String())
+	}
+	return proc{stdout: stdout.buffer.Bytes(), text: redact(stderr.buffer.String()+stdout.buffer.String(), token), exit: runErr}, nil
 }
 
 func (g *Grader) token() string {
@@ -225,4 +293,106 @@ func tail(s string) string {
 
 func checkResults(items []domain.Item, out *gradesOutput) ([]domain.Result, error) {
 	return grading.Validate(items, out)
+}
+
+// boundedBuffer drains child output without letting a faulty CLI exhaust server memory.
+type boundedBuffer struct {
+	buffer   bytes.Buffer
+	overflow bool
+}
+
+func (b *boundedBuffer) Write(raw []byte) (int, error) {
+	size := len(raw)
+	remaining := maxOutputBytes - b.buffer.Len()
+	if len(raw) > remaining {
+		b.overflow = true
+		raw = raw[:remaining]
+	}
+	_, _ = b.buffer.Write(raw)
+	return size, nil
+}
+
+func isolatedEnv(environ []string, root, token string) []string {
+	env := []string{
+		"HOME=" + filepath.Join(root, "home"),
+		"CLAUDE_CONFIG_DIR=" + filepath.Join(root, "config"),
+		"XDG_CONFIG_HOME=" + filepath.Join(root, "config"),
+		"XDG_CACHE_HOME=" + filepath.Join(root, "cache"),
+		"TMPDIR=" + filepath.Join(root, "tmp"),
+	}
+	for _, entry := range environ {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "PATH", "LANG", "LC_ALL", "LC_CTYPE", "SSL_CERT_FILE", "SSL_CERT_DIR", "SYSTEMROOT":
+			env = append(env, entry)
+		}
+	}
+	return childEnv(env, token)
+}
+
+// Raw CLI diagnostics can include account data and unrelated secrets, so isolated mode exposes only categories.
+func isolatedFailure(diagnostics string) error {
+	text := strings.ToLower(diagnostics)
+	switch {
+	case strings.Contains(text, "401") || strings.Contains(text, "unauthorized") || strings.Contains(text, "authentication") || strings.Contains(text, "invalid api key") || strings.Contains(text, "login"):
+		return errors.New("claude: authentication failed; save an explicit Claude credential")
+	case strings.Contains(text, "usage limit") || strings.Contains(text, "rate limit") || strings.Contains(text, "quota") || strings.Contains(text, "429"):
+		return errors.New("claude: usage limit reached; try again later")
+	default:
+		return errors.New("claude: execution failed; check the installed CLI and connection")
+	}
+}
+
+// Remove only this invocation's tree. WalkDir never descends through symlinks; restoring each
+// directory before descent also handles CLI-created read-only configuration directories.
+func removePrivateEnvironment(root string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), privateCleanupTimeout)
+	defer cancel()
+	private, err := os.OpenRoot(root)
+	if err != nil {
+		return fmt.Errorf("open private environment: %w", err)
+	}
+	defer private.Close()
+	var dirs []string
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("walk private environment: %w", walkErr)
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("clean private environment: %w", err)
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return fmt.Errorf("locate private entry: %w", err)
+		}
+		if entry.IsDir() {
+			// os.Root also confines a directory replaced with a symlink during cleanup.
+			if err := private.Chmod(relative, 0o700); err != nil {
+				return fmt.Errorf("restore private directory: %w", err)
+			}
+			if relative != "." {
+				dirs = append(dirs, relative)
+			}
+			return nil
+		}
+		if err := private.Remove(relative); err != nil {
+			return fmt.Errorf("remove private file: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("clean private environment: %w", err)
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("clean private environment: %w", err)
+		}
+		if err := private.Remove(dirs[i]); err != nil {
+			return fmt.Errorf("remove private directory: %w", err)
+		}
+	}
+	if err := os.Remove(root); err != nil {
+		return fmt.Errorf("remove private root: %w", err)
+	}
+	return nil
 }

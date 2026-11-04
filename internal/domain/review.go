@@ -83,9 +83,11 @@ type Item struct {
 	Topic  string `json:"topic"`
 	IsNew  bool   `json:"isNew"`
 	// Question and Back are plain text; inline code is kept in backticks.
-	Question  string           `json:"question"`
-	Back      string           `json:"back"`
-	Intervals map[Grade]string `json:"intervals,omitempty"`
+	Question     string           `json:"question"`
+	QuestionHTML string           `json:"question_html,omitempty"`
+	BackHTML     string           `json:"back_html,omitempty"`
+	Back         string           `json:"back"`
+	Intervals    map[Grade]string `json:"intervals,omitempty"`
 }
 
 // CardState is what Anki says about a card right now.

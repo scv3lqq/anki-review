@@ -45,3 +45,17 @@ func TestResultsViewKeyIsCardBack(t *testing.T) {
 		})
 	}
 }
+
+func TestHTMLViewsWithholdSkippedAndUngradedBack(t *testing.T) {
+	p := &domain.Pass{Session: "s", Items: []domain.Item{{N: 1, QuestionHTML: "<b>question</b>", BackHTML: "<b>secret</b>"}, {N: 2, QuestionHTML: "<i>second</i>", BackHTML: "<i>hidden</i>"}}, Answers: []domain.Answer{{N: 1, Text: "answer"}}, Results: []domain.Result{{N: 1, Grade: domain.Good}}}
+	if got := cardsView(p, false).Cards[0].QuestionHTML; got != "<b>question</b>" {
+		t.Fatalf("question HTML = %q", got)
+	}
+	view := resultsView(p)
+	if view.Items[0].BackHTML != "<b>secret</b>" || view.Items[0].QuestionHTML != "<b>question</b>" {
+		t.Fatal("graded HTML missing")
+	}
+	if view.Items[1].BackHTML != "" || !view.Items[1].Skipped {
+		t.Fatal("skipped answer HTML exposed")
+	}
+}

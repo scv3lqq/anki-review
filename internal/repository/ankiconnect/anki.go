@@ -8,10 +8,15 @@ import (
 	"strings"
 
 	"github.com/scv3lqq/anki-review/internal/domain"
+	"github.com/scv3lqq/anki-review/internal/repository/cardrender"
 )
 
 // "Default" is hidden when empty and makes getDeckStats fail for the whole list.
-const defaultDeck = "Default"
+const (
+	defaultDeck          = "Default"
+	maxRenderedCardBytes = 256 << 10
+	maxCardCSSBytes      = 64 << 10
+)
 
 type deckStats struct {
 	Name        string `json:"name"`
@@ -31,6 +36,7 @@ type cardInfo struct {
 	DeckName    string           `json:"deckName"`
 	Question    string           `json:"question"`
 	Answer      string           `json:"answer"`
+	CSS         string           `json:"css"`
 	Type        int              `json:"type"`
 	Due         int64            `json:"due"`
 	Reps        int              `json:"reps"`
@@ -136,6 +142,14 @@ func (c *Client) cardsInfo(ctx context.Context, ids []int64, fields []string) ([
 	if err := c.call(ctx, "cardsInfo", params, &infos); err != nil {
 		return nil, err
 	}
+	for _, info := range infos {
+		if len(info.Question)+len(info.Answer) > maxRenderedCardBytes {
+			return nil, fmt.Errorf("ankiconnect cardsInfo: %w: rendered card exceeds 256 KiB safe size limit", domain.ErrAnki)
+		}
+		if len(info.CSS) > maxCardCSSBytes {
+			return nil, fmt.Errorf("ankiconnect cardsInfo: %w: card CSS exceeds 64 KiB safe size limit", domain.ErrAnki)
+		}
+	}
 	return infos, nil
 }
 
@@ -175,16 +189,18 @@ func (c *Client) DueCards(ctx context.Context, deck string, limit int) ([]domain
 			topic = htmlToText(src.Value)
 		}
 		items = append(items, domain.Item{
-			N:         len(items) + 1,
-			CardID:    id,
-			Mod:       info.Mod,
-			Reps:      info.Reps,
-			Deck:      info.DeckName,
-			Topic:     topic,
-			IsNew:     info.Type == cardTypeNew,
-			Question:  question,
-			Back:      back,
-			Intervals: intervals(labels[id]),
+			N:            len(items) + 1,
+			CardID:       id,
+			Mod:          info.Mod,
+			Reps:         info.Reps,
+			Deck:         info.DeckName,
+			Topic:        topic,
+			IsNew:        info.Type == cardTypeNew,
+			Question:     question,
+			QuestionHTML: renderedHTML(info.CSS, info.Question),
+			BackHTML:     renderedHTML(info.CSS, info.Answer),
+			Back:         back,
+			Intervals:    intervals(labels[id]),
 		})
 	}
 	return items, nil
@@ -249,4 +265,12 @@ func (c *Client) Answer(ctx context.Context, answers []domain.CardAnswer) ([]boo
 // Sync syncs the collection with the server Anki is logged in to (AnkiWeb or self-hosted).
 func (c *Client) Sync(ctx context.Context) error {
 	return c.call(ctx, "sync", nil, nil)
+}
+
+// Template CSS belongs to each rendered side, including the original .card root selector.
+func renderedHTML(css, body string) string {
+	if css == "" {
+		return cardrender.Document(body)
+	}
+	return cardrender.Document("<style>" + css + "</style>" + body)
 }
