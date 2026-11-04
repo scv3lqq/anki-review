@@ -8,13 +8,53 @@ const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const pad = (n) => String(n).padStart(2, "0");
 
-const S = {
+const initialState = () => ({
   session: null, cards: [], screen: "boot", view: "card", idx: 0,
   answers: {}, touched: {}, grades: {}, open: null,
   results: null, locked: false, written: false, message: "", polling: null, more: 0, taking: false,
   decks: [], deck: null, starting: false, gradeError: "",
   authed: false, settings: false, provider: "claude", graderConnected: false,
-};
+  accountId: null, isOwner: false, managed: false, multiAccount: false,
+  knowledgeDecks: [], inviteLink: "", authBusy: false, importing: false,
+});
+const S = initialState();
+let accountEpoch = 0;
+let accountRequests = new AbortController();
+let invitation = new URLSearchParams(location.hash.slice(1)).get("invite") || "";
+
+class StaleAccount extends Error {
+  constructor() { super("Account changed"); this.name = "StaleAccount"; }
+}
+
+const currentAccount = (epoch) => epoch === accountEpoch;
+function assertCurrent(epoch) { if (!currentAccount(epoch)) throw new StaleAccount(); }
+const interrupted = (epoch, error) => !currentAccount(epoch) || error instanceof StaleAccount || error instanceof LoginRequired;
+
+function resetAccount(id = null) {
+  accountRequests.abort();
+  accountRequests = new AbortController();
+  accountEpoch++;
+  const multiAccount = S.multiAccount;
+  Object.assign(S, initialState(), { accountId: id, multiAccount });
+  if (typeof document !== "undefined") clearAccountDOM();
+}
+
+function selectAccount(info) {
+  resetAccount(info.account_id || "owner");
+  S.multiAccount = Boolean(info.multi_account);
+  S.isOwner = info.is_owner ?? S.accountId === "owner";
+  S.managed = Boolean(info.managed);
+  S.provider = info.grader_provider || "claude";
+  S.graderConnected = Boolean(info.grader_connected);
+}
+
+const storageKey = (name) => S.accountId ? `${STORE}:${S.accountId}:${name}` : null;
+function invitationLink(token) {
+  const link = new URL(location.href);
+  link.search = "";
+  link.hash = new URLSearchParams({ invite: token }).toString();
+  return link.href;
+}
 
 function el(tag, attrs = {}, ...kids) {
   const node = document.createElement(tag);
@@ -48,38 +88,42 @@ const failure = (err) => (err instanceof TypeError ? "Server not responding." : 
 // ---------- storage: survives a reload, never required ----------
 
 function save() {
-  if (!S.session) return;
+  if (!S.session || !S.accountId) return;
   const data = { answers: S.answers, touched: S.touched, idx: S.idx, view: S.view, grades: S.grades };
   try {
-    localStorage.setItem(`${STORE}:${S.session}`, JSON.stringify(data));
+    localStorage.setItem(storageKey(S.session), JSON.stringify(data));
   } catch {}
 }
 
 function load(session) {
+  if (!S.accountId) return null;
   try {
-    return JSON.parse(localStorage.getItem(`${STORE}:${session}`) || "null");
+    return JSON.parse(localStorage.getItem(storageKey(session)) || "null");
   } catch {
     return null;
   }
 }
 
 function forget(session) {
+  if (!S.accountId) return;
   try {
-    localStorage.removeItem(`${STORE}:${session}`);
+    localStorage.removeItem(storageKey(session));
   } catch {}
 }
 
 function pref(name) {
+  if (!S.accountId) return null;
   try {
-    return localStorage.getItem(`${STORE}:${name}`);
+    return localStorage.getItem(storageKey(name));
   } catch {
     return null;
   }
 }
 
 function setPref(name, value) {
+  if (!S.accountId) return;
   try {
-    localStorage.setItem(`${STORE}:${name}`, String(value));
+    localStorage.setItem(storageKey(name), String(value));
   } catch {}
 }
 
@@ -108,23 +152,89 @@ const filled = () => S.cards.filter((c) => norm(S.answers[c.n])).length;
 // a 401 "login" means the session is gone: the login screen takes over and the caller's loop stops
 class LoginRequired extends Error {}
 
+// Fence both fetch and body consumption. A response can arrive before an account switch while
+// its streamed JSON finishes afterward; neither completion may update the next account.
+function emptyJSON(error) { if (error instanceof StaleAccount) throw error; return {}; }
+function accountChanged() {
+  resetAccount();
+  if (typeof document !== "undefined") { S.screen = "boot"; show(); boot(); }
+  throw new StaleAccount();
+}
+
+function verifyResponseAccount(response, expected, epoch) {
+  assertCurrent(epoch);
+  const actual = response.headers?.get?.("X-Anki-Account");
+  if (expected && actual && actual !== expected) accountChanged();
+}
+
+function fencedResponse(response, epoch, expected) {
+  return new Proxy(response, { get(target, key) {
+    if (key === "json") return async () => {
+      try { const data = await target.json(); verifyResponseAccount(target, expected, epoch); return data; }
+      catch (error) { verifyResponseAccount(target, expected, epoch); throw error; }
+    };
+    if (key === "clone") return () => fencedResponse(target.clone(), epoch, expected);
+    const value = Reflect.get(target, key, target);
+    return typeof value === "function" ? value.bind(target) : value;
+  } });
+}
+
 async function call(path, init = {}) {
-  const res = await fetch(path, init);
-  if (res.status === 401 && (await res.clone().json().catch(() => ({}))).code === "login") {
-    showLogin();
-    throw new LoginRequired();
+  const epoch = accountEpoch;
+  const bootstrap = ["api/session", "api/setup", "api/register", "api/login"].includes(path);
+  const headers = { ...init.headers };
+  const expected = bootstrap ? null : headers["X-Anki-Account"] || S.accountId;
+  if (expected) headers["X-Anki-Account"] = expected;
+  else delete headers["X-Anki-Account"];
+  let response;
+  try { response = await fetch(path, { ...init, headers, signal: accountRequests.signal }); }
+  catch (error) { assertCurrent(epoch); throw error; }
+  verifyResponseAccount(response, expected, epoch);
+  const res = fencedResponse(response, epoch, expected);
+  if (res.status === 401 || res.status === 409) {
+    const reply = await res.clone().json().catch(emptyJSON);
+    assertCurrent(epoch);
+    if (reply.code === "account_changed") accountChanged();
+    if (res.status === 401 && reply.code === "login") { showLogin(); throw new LoginRequired(); }
   }
   return res;
 }
 
-// "ok", or the conflict code the server sent: "sent" (this stage is already posted), "session"
-// (this tab shows an older pass), "empty" (no cards left), "busy" (a stage is still running)
-async function post(path, body) {
-  const res = await call(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+function responseError(res, reply) {
+  return Object.assign(new Error(reply.error ?? `HTTP ${res.status}`), { status: res.status, code: reply.code, field: reply.field });
+}
+
+async function requestJSON(path, init = {}) {
+  const epoch = accountEpoch;
+  const res = await call(path, init);
+  assertCurrent(epoch);
+  const reply = await res.json().catch(emptyJSON);
+  assertCurrent(epoch);
+  if (!res.ok) throw responseError(res, reply);
+  return reply;
+}
+
+// "ok", or the conflict code returned by an account's current review pass.
+async function post(path, body, expected = S.accountId) {
+  const epoch = accountEpoch;
+  const headers = { "Content-Type": "application/json" };
+  if (expected) headers["X-Anki-Account"] = expected;
+  const res = await call(path, { method: "POST", headers, body: JSON.stringify(body) });
+  assertCurrent(epoch);
   if (res.ok) return "ok";
-  const reply = await res.json().catch(() => ({}));
+  const reply = await res.json().catch(emptyJSON);
+  assertCurrent(epoch);
   if (res.status === 409 && ["sent", "session", "empty", "busy"].includes(reply.code)) return reply.code;
-  throw Object.assign(new Error(reply.error ?? `HTTP ${res.status}`), { status: res.status, code: reply.code, field: reply.field });
+  throw responseError(res, reply);
+}
+
+function cardContent(item, side = "question") {
+  if (!item[`${side === "back" ? "back" : "question"}_html`]) return el("span", {}, ...rich(item[side]));
+  return el("iframe", {
+    class: "card-frame", title: side === "back" ? "Card answer key" : "Card question",
+    src: `api/render?${new URLSearchParams({ session: S.session, n: item.n, side })}`,
+    sandbox: "allow-same-origin", loading: "lazy", referrerpolicy: "no-referrer",
+  });
 }
 
 // ---------- screens ----------
@@ -157,6 +267,7 @@ function show() {
   $("settings").hidden = active !== "settings";
   if (input && S.view === "card") renderCard();
   if (input && S.view === "list") renderList();
+  configureAccountUI();
 }
 
 function setView(view) {
@@ -168,13 +279,16 @@ function setView(view) {
 }
 
 async function backToDecks() {
+  const epoch = accountEpoch;
   if (S.screen === "input" && filled() > 0 && !confirm("Drop this batch? Your typed answers will be lost.")) return;
   if (S.screen === "results" && !S.written && !confirm("Grades aren't saved to Anki yet. Drop this batch?")) return;
   try {
     // any outcome ends in a reload: it shows whatever the server holds now
-    if ((await post("api/reset", { session: S.session })) === "ok") forget(S.session);
-  } catch {}
-  location.reload();
+    const outcome = await post("api/reset", { session: S.session });
+    assertCurrent(epoch);
+    if (outcome === "ok") forget(S.session);
+  } catch (error) { if (interrupted(epoch, error)) return; }
+  if (currentAccount(epoch)) location.reload();
 }
 
 $("back").addEventListener("click", backToDecks);
@@ -183,6 +297,7 @@ $("to-decks").addEventListener("click", backToDecks);
 // ---------- start: deck list ----------
 
 async function showStart() {
+  const epoch = accountEpoch;
   S.screen = "start";
   S.session = null;
   S.message = "";
@@ -192,10 +307,12 @@ async function showStart() {
   $("start-go").disabled = true;
   try {
     const res = await call("api/decks", { cache: "no-store" });
-    const data = await res.json().catch(() => ({}));
+    const data = await res.json().catch(emptyJSON);
+    assertCurrent(epoch);
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
     S.decks = data.decks ?? [];
   } catch (err) {
+    if (interrupted(epoch, err)) return;
     S.decks = [];
     S.message = failure(err);
   }
@@ -235,6 +352,7 @@ function renderStart() {
 }
 
 async function startPass() {
+  const epoch = accountEpoch;
   const input = $("start-count");
   const deck = S.decks.find((d) => d.name === S.deck);
   if (!deck || S.starting || !validCount(input.value, deck.due)) return;
@@ -246,12 +364,15 @@ async function startPass() {
   renderStart();
   try {
     // "empty": the deck changed since the list was loaded, load it again
-    if ((await post("api/start", { deck: deck.name, count })) === "empty") {
+    const outcome = await post("api/start", { deck: deck.name, count });
+    assertCurrent(epoch);
+    if (outcome === "empty") {
       S.starting = false;
       return showStart();
     }
     location.reload();
   } catch (err) {
+    if (interrupted(epoch, err)) return;
     S.starting = false;
     S.message = failure(err);
     renderStart();
@@ -287,7 +408,7 @@ function renderCard() {
   $("pos").textContent = `${pad(S.idx + 1)} / ${pad(S.cards.length)}`;
   $("chip-new").hidden = !card.isNew;
   const q = $("q");
-  q.replaceChildren(...rich(card.question));
+  q.replaceChildren(cardContent(card));
   q.classList.toggle("long", card.question.length > 180 || card.question.split("\n").length > 3);
   const ta = $("answer");
   ta.value = S.answers[card.n] ?? "";
@@ -398,7 +519,7 @@ function renderList() {
       (fields[i + 1] ?? $("list-submit")).focus();
     });
     fields.push(ta);
-    return el("li", { class: "row" }, num, el("div", { class: "rq" }, ...rich(card.question)), ta);
+    return el("li", { class: "row" }, num, el("div", { class: "rq" }, cardContent(card)), ta);
   }));
   fields.forEach(autosize);
   renderListBar();
@@ -429,6 +550,7 @@ function showGradeError(reason) {
 }
 
 async function submit() {
+  const epoch = accountEpoch;
   S.screen = "checking";
   S.gradeError = "";
   save();
@@ -436,26 +558,38 @@ async function submit() {
   renderChecking();
   try {
     const answers = S.cards.map((c) => ({ n: c.n, answer: norm(S.answers[c.n]) }));
-    if ((await post("api/answers", { session: S.session, answers })) === "session") return location.reload();
+    const outcome = await post("api/answers", { session: S.session, answers });
+    assertCurrent(epoch);
+    if (outcome === "session") return location.reload();
     pollResults();
-  } catch {
+  } catch (error) {
+    if (interrupted(epoch, error)) return;
     renderChecking("Server not responding. Your answers are saved in this browser: reload the page later.", true);
   }
 }
 
 async function pollResults() {
+  const epoch = accountEpoch;
   const token = (S.polling = Symbol("results"));
   let fails = 0;
-  while (S.polling === token) {
+  while (currentAccount(epoch) && S.polling === token) {
     try {
       const res = await call("api/results", { cache: "no-store" });
-      if (res.status === 200) return showResults(await res.json());
+      if (res.status === 200) {
+        const data = await res.json();
+        assertCurrent(epoch);
+        if (S.polling !== token) return;
+        return showResults(data);
+      }
       if (res.status === 409) {
-        const reply = await res.json().catch(() => ({}));
+        const reply = await res.json().catch(emptyJSON);
+        assertCurrent(epoch);
+        if (S.polling !== token) return;
         if (reply.code === "grading_failed") return showGradeError(reply.error);
       }
       fails = 0;
-    } catch {
+    } catch (error) {
+      if (interrupted(epoch, error)) return;
       if (++fails === 3) renderChecking("Server not responding, waiting…", true);
     }
     await sleep(POLL_MS);
@@ -463,17 +597,21 @@ async function pollResults() {
 }
 
 async function regrade() {
+  const epoch = accountEpoch;
   $("retry").disabled = true;
   try {
-    if ((await post("api/regrade", { session: S.session })) === "session") return location.reload();
+    const outcome = await post("api/regrade", { session: S.session });
+    assertCurrent(epoch);
+    if (outcome === "session") return location.reload();
     S.gradeError = "";
     show();
     renderChecking();
     pollResults();
   } catch (err) {
+    if (interrupted(epoch, err)) return;
     renderChecking(failure(err), true);
   } finally {
-    $("retry").disabled = false;
+    if (currentAccount(epoch)) $("retry").disabled = false;
   }
 }
 
@@ -506,7 +644,8 @@ function resultRow(item) {
   const question = el("span", { class: "rq" }, ...rich(item.question));
   if (item.skipped) {
     return el("li", { class: "res skipped" },
-      el("div", { class: "res-head" }, num, question, el("span", { class: "ivl" }, "still due"), el("span", { class: "badge skip" }, "skipped")));
+      el("div", { class: "res-head" }, num, question, el("span", { class: "ivl" }, "still due"), el("span", { class: "badge skip" }, "skipped")),
+      item.question_html && cardContent(item));
   }
   const grade = S.grades[item.n];
   const open = Boolean(S.open[item.n]);
@@ -521,9 +660,10 @@ function resultRow(item) {
     },
   }, num, question, el("span", { class: "ivl" }, interval ? `→ ${interval}` : ""), el("span", { class: `badge ${grade.toLowerCase()}` }, grade));
   const facts = el("dl", { class: "kv" },
+    item.question_html && [el("dt", {}, "Question"), el("dd", {}, cardContent(item))],
     el("dt", {}, "You"), el("dd", { class: "you" }, item.answer === "?" ? "don't know" : item.answer),
     item.mistake && [el("dt", {}, "Mistake"), el("dd", { class: "err" }, ...rich(item.mistake))],
-    item.back && [el("dt", {}, "Key"), el("dd", {}, ...rich(item.back))],
+    (item.back || item.back_html) && [el("dt", {}, "Key"), el("dd", {}, cardContent(item, "back"))],
     item.note && [el("dt", {}, "Note"), el("dd", { class: "note" }, ...rich(item.note))]);
   const buttons = el("div", { class: "grades" }, ...GRADES.map((g) => el("button", {
     type: "button",
@@ -578,6 +718,7 @@ function renderResults() {
 }
 
 async function takeMore() {
+  const epoch = accountEpoch;
   const input = $("take-count");
   if (S.taking || !validCount(input.value, S.more)) return;
   const count = Number(input.value);
@@ -586,7 +727,9 @@ async function takeMore() {
   S.message = "";
   renderResults();
   try {
-    if ((await post("api/more", { session: S.session, count })) === "empty") {
+    const outcome = await post("api/more", { session: S.session, count });
+    assertCurrent(epoch);
+    if (outcome === "empty") {
       S.taking = false;
       S.more = 0;
       return renderResults();
@@ -594,6 +737,7 @@ async function takeMore() {
     // the server switched to the next pass (this tab or another one asked): start over from its state
     location.reload();
   } catch (err) {
+    if (interrupted(epoch, err)) return;
     S.taking = false;
     S.message = failure(err);
     renderResults();
@@ -615,17 +759,24 @@ $("take-count").addEventListener("blur", (e) => {
 });
 
 async function write() {
+  const epoch = accountEpoch;
   S.locked = true;
   S.message = "";
   renderResults();
   try {
     const grades = S.results.filter((i) => !i.skipped).map((i) => ({ n: i.n, grade: S.grades[i.n] }));
     const sent = await post("api/confirm", { session: S.session, grades });
+    assertCurrent(epoch);
     if (sent === "session") return location.reload();
     // another tab confirmed first: show the grades the server holds, not this tab's
-    if (sent === "sent") return showResults(await (await call("api/results", { cache: "no-store" })).json());
+    if (sent === "sent") {
+      const data = await requestJSON("api/results", { cache: "no-store" });
+      assertCurrent(epoch);
+      return showResults(data);
+    }
     pollStatus();
-  } catch {
+  } catch (error) {
+    if (interrupted(epoch, error)) return;
     S.locked = false;
     S.message = "Server not responding, grades not sent.";
     renderResults();
@@ -633,12 +784,15 @@ async function write() {
 }
 
 async function pollStatus() {
+  const epoch = accountEpoch;
   const token = (S.polling = Symbol("status"));
-  while (S.polling === token) {
+  while (currentAccount(epoch) && S.polling === token) {
     try {
       const res = await call("api/status", { cache: "no-store" });
       if (res.status === 200) {
         const status = await res.json();
+        assertCurrent(epoch);
+        if (S.polling !== token) return;
         S.message = status.message ?? "";
         S.more = status.more ?? 0;
         S.written = Boolean(status.written);
@@ -650,7 +804,7 @@ async function pollStatus() {
           return save();
         }
       }
-    } catch {}
+    } catch (error) { if (interrupted(epoch, error)) return; }
     await sleep(POLL_MS);
   }
 }
@@ -683,6 +837,7 @@ function providerFields(prefix) {
 for (const prefix of ["setup", "set"]) $(`${prefix}-provider`).addEventListener("change", () => providerFields(prefix));
 
 async function authFile(id, required = false) {
+  const epoch = accountEpoch;
   const file = $(id).files[0];
   if (!file) {
     if (required) throw { field: "codex_auth", message: "Choose auth.json from a dedicated Codex ChatGPT login." };
@@ -691,9 +846,10 @@ async function authFile(id, required = false) {
   if (file.size > 1024 * 1024) throw { field: "codex_auth", message: "auth.json is too large." };
   try {
     const text = await file.text();
+    assertCurrent(epoch);
     JSON.parse(text);
     return text;
-  } catch { throw { field: "codex_auth", message: "Choose a valid auth.json file." }; }
+  } catch (error) { assertCurrent(epoch); throw { field: "codex_auth", message: "Choose a valid auth.json file." }; }
 }
 
 function savedProviderStatus() {
@@ -766,12 +922,45 @@ function clearForm(form) {
   form.reset();
 }
 
-function showSetup() {
-  S.screen = "setup";
-  S.authed = false;
-  S.settings = false;
-  S.polling = null;
+function clearAccountDOM() {
+  for (const id of ["setup-form", "login-form", "settings-form"]) clearForm($(id));
+  for (const id of ["answer", "knowledge-decks", "invite-link", "start-import-file", "set-import-file"]) $(id).value = "";
+  for (const id of ["q", "rows", "res-rows", "decks", "counters", "chips", "strip", "progress"]) $(id).replaceChildren();
+  $("invite-link-field").hidden = true;
+  for (const id of ["setup-status", "login-status", "set-status", "invite-status", "preferences-status", "start-import-status", "set-import-status"]) say(id);
+  $("grader-status").textContent = "";
   $("meta").textContent = "";
+  for (const id of ["setup-submit", "login-submit", "set-submit", "invite-create", "preferences-save"]) $(id).disabled = false;
+}
+
+const collectionAvailable = () => S.screen === "start" || (S.screen === "results" && S.written);
+
+function configureAccountUI() {
+  $("setup-anki-field").hidden = Boolean(invitation);
+  $("set-anki-field").hidden = S.managed;
+  $("invitations").hidden = !S.authed || !S.multiAccount || !S.isOwner;
+  $("registration-login").hidden = !invitation;
+  for (const hint of document.querySelectorAll(".legacy-login-help")) hint.hidden = S.multiAccount || Boolean(invitation);
+  for (const prefix of ["start-import", "set-import"]) {
+    $(prefix).hidden = !S.authed;
+    $(`${prefix}-submit`).disabled = S.importing || !collectionAvailable();
+    $(`${prefix}-file`).disabled = S.importing || !collectionAvailable();
+  }
+  $("preferences-save").disabled = !collectionAvailable();
+  $("knowledge-decks").disabled = !collectionAvailable();
+}
+
+function showSetup() {
+  const provider = S.provider;
+  resetAccount();
+  S.provider = provider;
+  S.screen = "setup";
+  $("meta").textContent = "";
+  $("setup-title").textContent = invitation ? "Create your account" : "Set up";
+  $("setup-lede").textContent = invitation
+    ? "Choose your login and password, then add your own grading credentials. After registering, import your Anki package."
+    : "Create the owner login. Choose a grading provider. The server checks the credentials, then encrypts them under this password.";
+  $("setup-submit").textContent = invitation ? "Create account" : "Set up";
   show();
   $("setup-provider").value = S.provider;
   providerFields("setup");
@@ -779,10 +968,8 @@ function showSetup() {
 }
 
 function showLogin() {
+  resetAccount();
   S.screen = "login";
-  S.authed = false;
-  S.settings = false;
-  S.polling = null;
   $("meta").textContent = "";
   clearForm($("login-form"));
   say("login-status");
@@ -790,8 +977,18 @@ function showLogin() {
   $("login-user").focus();
 }
 
+function clearInvitation() {
+  invitation = "";
+  const url = new URL(location.href);
+  url.hash = "";
+  history.replaceState(null, "", url.href);
+}
+
 async function submitSetup(event) {
   event.preventDefault();
+  if (S.authBusy) return;
+  const epoch = accountEpoch;
+  const invited = invitation;
   const user = $("setup-user").value.trim();
   const password = $("setup-password").value;
   const claude = $("setup-claude").value.trim();
@@ -801,61 +998,75 @@ async function submitSetup(event) {
     "setup-user": loginError(user),
     "setup-password": passwordError(password),
     "setup-repeat": password === $("setup-repeat").value ? "" : "The passwords don't match.",
-    "setup-claude": provider === "claude" ? claudeError(claude) : "",
-    "setup-anki": ankiError(anki),
+    "setup-claude": provider !== "claude" ? "" : !claude && (invited || S.multiAccount) ? "Enter your own Claude token." : claudeError(claude),
+    "setup-anki": invited ? "" : ankiError(anki),
   });
   if (first) return $(first).focus();
   const submit = $("setup-submit");
+  S.authBusy = true;
   submit.disabled = true;
   submit.textContent = "Checking…";
-  say("setup-status", `Checking AnkiConnect and ${provider === "codex" ? "Codex" : "Claude"}, up to a minute…`);
+  say("setup-status", `Checking your ${provider === "codex" ? "Codex" : "Claude"} credentials and collection…`);
   try {
     const codexAuth = provider === "codex" ? await authFile("setup-codex", true) : undefined;
-    await post("api/setup", { user, password, grader_provider: provider, codex_auth: codexAuth, claude_token: provider === "claude" ? claude : "", anki_key: anki });
+    assertCurrent(epoch);
+    const body = { user, password, grader_provider: provider, codex_auth: codexAuth, claude_token: provider === "claude" ? claude : "" };
+    if (invited) body.invitation = invited;
+    else body.anki_key = anki;
+    const outcome = await post(invited ? "api/register" : "api/setup", body);
+    assertCurrent(epoch);
+    if (outcome !== "ok") throw new Error("Account registration is busy. Try again shortly.");
+    clearForm($("setup-form"));
+    if (invited) clearInvitation();
+    return boot();
   } catch (err) {
-    submit.disabled = false;
-    submit.textContent = "Set up";
+    if (interrupted(epoch, err)) return;
     say("setup-status");
-    // someone else set the owner up first: the page routes to the login screen
     if (err.code === "setup_done") return boot();
     const id = SETUP_FIELDS[err.field];
-    if (id) {
-      setFieldError(id, err.message);
-      return $(id).focus();
-    }
+    if (id) { setFieldError(id, err.message); return $(id).focus(); }
     say("setup-status", failure(err), true);
-    return;
+  } finally {
+    if (currentAccount(epoch)) { S.authBusy = false; submit.disabled = false; submit.textContent = invited ? "Create account" : "Set up"; }
   }
-  clearForm($("setup-form"));
-  return boot();
 }
 
 async function submitLogin(event) {
   event.preventDefault();
+  if (S.authBusy) return;
+  const epoch = accountEpoch;
   const user = $("login-user").value.trim();
   const password = $("login-password").value;
   if (!user || !password) return say("login-status", "Enter your login and password.", true);
-  const submit = $("login-submit");
-  submit.disabled = true;
+  S.authBusy = true;
+  $("login-submit").disabled = true;
   say("login-status");
   try {
     await post("api/login", { user, password });
+    assertCurrent(epoch);
+    clearForm($("login-form"));
+    return boot();
   } catch (err) {
-    submit.disabled = false;
+    if (interrupted(epoch, err)) return;
     if (err.code === "setup") return boot();
     say("login-status", err.status === 401 ? "Wrong login or password" : failure(err), true);
     $("login-password").value = "";
-    return $("login-password").focus();
+    $("login-password").focus();
+  } finally {
+    if (currentAccount(epoch)) { S.authBusy = false; $("login-submit").disabled = false; }
   }
-  clearForm($("login-form"));
-  return boot();
 }
 
 async function logout() {
-  try {
-    await post("api/logout", {});
-  } catch {}
+  const expected = S.accountId;
   showLogin();
+  const epoch = accountEpoch;
+  S.authBusy = true;
+  $("login-submit").disabled = true;
+  let complete = false;
+  try { await post("api/logout", {}, expected); assertCurrent(epoch); complete = true; }
+  catch (error) { if (interrupted(epoch, error)) return; say("login-status", "Could not finish logging out. Reload before logging in again.", true); }
+  finally { if (currentAccount(epoch)) { S.authBusy = !complete; $("login-submit").disabled = !complete; } }
 }
 
 function openSettings() {
@@ -865,7 +1076,9 @@ function openSettings() {
   providerFields("set");
   savedProviderStatus();
   say("set-status");
+  say("preferences-status", collectionAvailable() ? "Loading your deck preferences…" : "Finish or drop the current batch before changing deck preferences or importing cards.");
   show();
+  loadPreferences();
   $("set-current").focus();
 }
 
@@ -877,6 +1090,7 @@ function closeSettings() {
 
 async function saveSettings(event) {
   event.preventDefault();
+  const epoch = accountEpoch;
   const current = $("set-current").value;
   const next = $("set-new").value;
   const repeat = $("set-repeat").value;
@@ -884,47 +1098,113 @@ async function saveSettings(event) {
   const anki = $("set-anki").value.trim();
   const provider = $("set-provider").value;
   const changing = next !== "" || repeat !== "";
+  const needsClaude = provider === "claude" && S.multiAccount && provider === S.provider && !S.graderConnected;
   const first = markErrors({
     "set-current": current ? "" : "Enter your current password.",
     "set-new": !changing ? "" : next === "" ? "Enter the new password too." : passwordError(next),
     "set-repeat": next !== "" && next !== repeat ? "The passwords don't match." : "",
-    "set-claude": provider === "claude" ? claudeError(claude) : "",
-    "set-anki": ankiError(anki),
+    "set-claude": provider !== "claude" ? "" : needsClaude && !claude ? "Enter your own Claude token." : claudeError(claude),
+    "set-anki": S.managed ? "" : ankiError(anki),
   });
   if (first) return $(first).focus();
-  // an empty optional field is not sent: the server keeps the current value
   const body = { password: current };
   if (next) body.new_password = next;
   if (claude && provider === "claude") body.claude_token = claude;
   if (provider !== S.provider) body.grader_provider = provider;
-  if (anki) body.anki_key = anki;
+  if (anki && !S.managed) body.anki_key = anki;
   const submit = $("set-submit");
   submit.disabled = true;
   say("set-status", "Checking changes and saving…");
   try {
-    if (provider === "codex") body.codex_auth = await authFile("set-codex");
+    if (provider === "codex") body.codex_auth = await authFile("set-codex", provider === S.provider && !S.graderConnected);
+    assertCurrent(epoch);
     await post("api/settings", body);
+    assertCurrent(epoch);
+    clearForm($("settings-form"));
+    S.provider = provider;
+    S.graderConnected = true;
+    $("set-provider").value = provider;
+    providerFields("set");
+    savedProviderStatus();
+    say("set-status", "Saved. The selected provider will be used on the next grading call.");
   } catch (err) {
-    submit.disabled = false;
-    if (err.code === "credentials") {
-      setFieldError("set-current", "Wrong current password.");
-      return $("set-current").focus();
-    }
+    if (interrupted(epoch, err)) return;
+    if (err.code === "credentials") { setFieldError("set-current", "Wrong current password."); return $("set-current").focus(); }
     const id = SETTINGS_FIELDS[err.field];
-    if (id) {
-      setFieldError(id, err.message);
-      return $(id).focus();
-    }
-    return say("set-status", failure(err), true);
-  }
-  submit.disabled = false;
-  clearForm($("settings-form"));
-  S.provider = provider;
-  S.graderConnected = true;
-  $("set-provider").value = provider;
-  providerFields("set");
-  savedProviderStatus();
-  return say("set-status", "Saved. The selected provider will be used on the next grading call.");
+    if (id) { setFieldError(id, err.message); return $(id).focus(); }
+    say("set-status", failure(err), true);
+  } finally { if (currentAccount(epoch)) submit.disabled = false; }
+}
+
+async function loadPreferences() {
+  const epoch = accountEpoch;
+  try {
+    const data = await requestJSON("api/preferences", { cache: "no-store" });
+    assertCurrent(epoch);
+    S.knowledgeDecks = Array.isArray(data.knowledge_decks) ? data.knowledge_decks : [];
+    $("knowledge-decks").value = S.knowledgeDecks.join("\n");
+    if (collectionAvailable()) say("preferences-status");
+  } catch (error) { if (!interrupted(epoch, error)) say("preferences-status", failure(error), true); }
+}
+
+async function savePreferences(event) {
+  event.preventDefault();
+  const epoch = accountEpoch;
+  const decks = $("knowledge-decks").value.split("\n").map((name) => name.trim()).filter(Boolean);
+  if (decks.length > 64 || decks.some((name) => utf8Length(name) > 256)) return say("preferences-status", "Use at most 64 deck names, each at most 256 bytes.", true);
+  $("preferences-save").disabled = true;
+  try {
+    const outcome = await post("api/preferences", { knowledge_decks: decks });
+    assertCurrent(epoch);
+    if (outcome !== "ok") return say("preferences-status", "Finish or drop the current batch before changing deck preferences.", true);
+    S.knowledgeDecks = decks;
+    say("preferences-status", "Deck preferences saved for your next batch.");
+  } catch (error) { if (!interrupted(epoch, error)) say("preferences-status", failure(error), true); }
+  finally { if (currentAccount(epoch)) configureAccountUI(); }
+}
+
+async function importCards(prefix) {
+  const epoch = accountEpoch;
+  const file = $(`${prefix}-file`).files[0];
+  if (!file) return say(`${prefix}-status`, "Choose an .apkg package.", true);
+  if (file.size > 8 * 1024 * 1024) return say(`${prefix}-status`, "The package must be at most 8 MiB. Export with Support older Anki versions enabled.", true);
+  if (!file.name.toLowerCase().endsWith(".apkg")) return say(`${prefix}-status`, "Choose an .apkg package. Export with Support older Anki versions enabled.", true);
+  if (!collectionAvailable() || S.importing) return say(`${prefix}-status`, "Finish or drop the current batch before importing cards.", true);
+  S.importing = true;
+  configureAccountUI();
+  say(`${prefix}-status`, "Importing cards, media and scheduling…");
+  try {
+    await requestJSON("api/import", { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Anki-Import": "1" }, body: file });
+    assertCurrent(epoch);
+    $(`${prefix}-file`).value = "";
+    say(`${prefix}-status`, "Cards imported. They will appear in your deck list.");
+    if (S.screen === "start") await showStart();
+  } catch (error) {
+    if (interrupted(epoch, error)) return;
+    say(`${prefix}-status`, error.code === "busy" ? "Finish or drop the current batch before importing cards." : failure(error), true);
+  } finally { if (currentAccount(epoch)) { S.importing = false; configureAccountUI(); } }
+}
+
+async function createInvitation() {
+  const epoch = accountEpoch;
+  if (!S.isOwner || !S.multiAccount) return;
+  $("invite-create").disabled = true;
+  try {
+    const data = await requestJSON("api/invitations", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    assertCurrent(epoch);
+    if (typeof data.token !== "string" || !data.token) throw new Error("Invitation response was incomplete.");
+    S.inviteLink = invitationLink(data.token);
+    $("invite-link").value = S.inviteLink;
+    $("invite-link-field").hidden = false;
+    say("invite-status", `Invitation created. Expires ${new Date(data.expires_at).toLocaleString()}.`);
+  } catch (error) { if (!interrupted(epoch, error)) say("invite-status", failure(error), true); }
+  finally { if (currentAccount(epoch)) $("invite-create").disabled = false; }
+}
+
+async function copyInvitation() {
+  const epoch = accountEpoch;
+  try { await navigator.clipboard.writeText(S.inviteLink); assertCurrent(epoch); say("invite-status", "Invitation link copied."); }
+  catch (error) { if (!interrupted(epoch, error)) say("invite-status", "Copy the invitation link from the field above.", true); }
 }
 
 $("setup-form").addEventListener("submit", submitSetup);
@@ -933,6 +1213,11 @@ $("settings-form").addEventListener("submit", saveSettings);
 $("settings-btn").addEventListener("click", openSettings);
 $("set-back").addEventListener("click", closeSettings);
 $("logout").addEventListener("click", logout);
+$("preferences-form").addEventListener("submit", savePreferences);
+$("invite-create").addEventListener("click", createInvitation);
+$("invite-copy").addEventListener("click", copyInvitation);
+$("registration-login").addEventListener("click", () => { clearInvitation(); showLogin(); });
+for (const prefix of ["start-import", "set-import"]) $(`${prefix}-submit`).addEventListener("click", () => importCards(prefix));
 
 // ---------- boot ----------
 
@@ -942,26 +1227,29 @@ function showError() {
 }
 
 async function boot() {
+  let epoch = accountEpoch;
   let info;
   try {
-    info = await (await fetch("api/session", { cache: "no-store" })).json();
-  } catch {
-    return showError();
+    info = await requestJSON("api/session", { cache: "no-store" });
+    assertCurrent(epoch);
+  } catch (error) {
+    if (!interrupted(epoch, error)) showError();
+    return;
   }
+  S.multiAccount = Boolean(info.multi_account);
   S.provider = info.grader_provider || "claude";
-  S.graderConnected = Boolean(info.grader_connected);
+  if (invitation && S.multiAccount) return showSetup();
   if (info.state === "setup") return showSetup();
   if (info.state === "login") return showLogin();
+  if (info.state !== "ready") return showError();
+  selectAccount(info);
+  epoch = accountEpoch;
   S.authed = true;
   let data;
   try {
-    const res = await call("api/cards", { cache: "no-store" });
-    if (!res.ok) throw new Error(String(res.status));
-    data = await res.json();
-  } catch (err) {
-    if (err instanceof LoginRequired) return;
-    return showError();
-  }
+    data = await requestJSON("api/cards", { cache: "no-store" });
+    assertCurrent(epoch);
+  } catch (error) { if (!interrupted(epoch, error)) showError(); return; }
   if (data.stage === "idle") return showStart();
   S.session = data.session;
   S.cards = data.cards;
@@ -973,25 +1261,19 @@ async function boot() {
     S.view = saved.view === "list" ? "list" : "card";
     S.grades = saved.grades ?? {};
   }
-  for (const a of data.answers ?? []) S.answers[a.n] = a.answer;
+  for (const answer of data.answers ?? []) S.answers[answer.n] = answer.answer;
   $("meta").textContent = [data.deck, `${data.due} due`, data.fresh ? `${data.fresh} new` : null].filter(Boolean).join(" · ");
-
-  if (data.stage === "input") {
-    S.screen = "input";
-    return show();
-  }
+  if (data.stage === "input") { S.screen = "input"; return show(); }
   if (data.stage === "checking") {
     S.screen = "checking";
     if (data.gradeError) return showGradeError(data.gradeError);
-    show();
-    renderChecking();
-    return pollResults();
+    show(); renderChecking(); return pollResults();
   }
   try {
-    showResults(await (await call("api/results", { cache: "no-store" })).json());
-  } catch (err) {
-    if (!(err instanceof LoginRequired)) showError();
-  }
+    const results = await requestJSON("api/results", { cache: "no-store" });
+    assertCurrent(epoch);
+    showResults(results);
+  } catch (error) { if (!interrupted(epoch, error)) showError(); }
 }
 
 boot();

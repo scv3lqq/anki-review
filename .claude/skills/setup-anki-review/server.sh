@@ -42,10 +42,11 @@ die() {
 
 svc="anki-review"
 bin_local=$root/bin/anki-review-linux-amd64
-kit_top="install.sh smoke.sh provider.sh test-provider.sh autodeploy.sh"
-kit_units="anki-review.service anki-review-deploy.service anki-review-deploy.timer"
+bin_provisioner_local=$root/bin/anki-review-provisioner-linux-amd64
+kit_top="install.sh smoke.sh provider.sh test-provider.sh autodeploy.sh install-multi-account.sh check-passes.py test-multi-account.py"
+kit_units="anki-review.service anki-review-deploy.service anki-review-deploy.timer anki-review-provisioner.service"
 kit_anki="Dockerfile compose.yaml entrypoint.sh setup-profile.py syncserver.sh up.sh"
-kit_all="$kit_top systemd/anki-review.service systemd/anki-review-deploy.service systemd/anki-review-deploy.timer anki/Dockerfile anki/compose.yaml anki/entrypoint.sh anki/setup-profile.py anki/syncserver.sh anki/up.sh"
+kit_all="$kit_top systemd/anki-review.service systemd/anki-review-deploy.service systemd/anki-review-deploy.timer systemd/anki-review-provisioner.service anki/Dockerfile anki/compose.yaml anki/entrypoint.sh anki/setup-profile.py anki/syncserver.sh anki/up.sh"
 host=$(trim "${DEPLOY_SSH:-}")
 port=$(trim "${DEPLOY_SSH_PORT:-}")
 port=${port:-22}
@@ -236,6 +237,8 @@ cmd_upload_bin() {
 cmd_upload() {
   local f top=() units=() anki=()
   need_bin
+  [ -f "$bin_provisioner_local" ] || die "missing provisioning binary: run make build-provisioner-linux"
+  [ "$(head -c 4 "$bin_provisioner_local" | od -An -c | tr -d ' ')" = '177ELF' ] || die "provisioner is not a Linux binary"
   resolve_dir
   for f in $kit_all; do [ -f "$root/deploy/$f" ] || die "missing deploy/$f"; done
   for f in $kit_top; do top+=("$root/deploy/$f"); done
@@ -248,6 +251,9 @@ cmd_upload() {
   rcp "${anki[@]}" "$host:$dir/anki/"
   echo "kit uploaded to $dir"
   cmd_upload_bin
+  rcp "$bin_provisioner_local" "$host:$dir/bin/anki-review-provisioner-linux-amd64.new"
+  rsh "chmod 0755 $(q "$dir/bin/anki-review-provisioner-linux-amd64.new") && mv -f $(q "$dir/bin/anki-review-provisioner-linux-amd64.new") $(q "$dir/bin/anki-review-provisioner-linux-amd64")"
+  echo "provisioner binary uploaded"
 }
 
 # The public half of the key this clone signs commits with, as DEPLOY_DIR/allowed_signers: the one
@@ -440,15 +446,53 @@ cmd_app_tunnel() {
     -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -N -L "127.0.0.1:8768:127.0.0.1:$app_port" "$host"
 }
 
+# Accept only a bounded ordinary session response, without relying on public unlock data.
+session_mode() {
+  python3 -I -c '
+import json, sys
+try:
+    raw = sys.stdin.read(100001)
+    if len(raw) > 100000:
+        raise ValueError
+    state = json.loads(raw)
+    if not isinstance(state, dict):
+        raise ValueError
+    if not isinstance(state.get("state"), str) or state["state"] not in ("setup", "login", "ready"):
+        raise ValueError
+    for field in ("multi_account", "unlocked"):
+        if field in state and not isinstance(state[field], bool):
+            raise ValueError
+    if "stage" in state and (not isinstance(state["stage"], str) or state["stage"] not in ("idle", "input", "checking", "results", "confirmed", "written")):
+        raise ValueError
+    print("multi-account" if state.get("multi_account") is True else "single-account")
+except ValueError:
+    sys.exit(1)
+'
+}
+
+refuse_multi_restart() {
+  local out mode
+  [ -z "${ACCOUNT_SOCKET:-}" ] || die "multi-account mode requires explicit maintenance; automated restart refused"
+  need_app_port
+  out=$(rsh "curl -fsS -m 5 http://127.0.0.1:$app_port/api/session") || die "cannot establish account mode; automated restart refused"
+  mode=$(printf '%s' "$out" | session_mode) || die "cannot establish account mode; automated restart refused"
+  [ "$mode" != multi-account ] || die "multi-account mode requires explicit maintenance and private saved-pass checks; automated restart refused"
+}
+
 # Asks the host itself, so no tunnel is needed; the answer holds no secret.
 cmd_wait_setup() {
-  local i out answered=0
+  local i out mode answered=0
   need_app_port
   for i in $(seq 1 360); do
     # ssh failing is not a state of the owner: remember whether the host ever answered.
     out=$(rsh "curl -fsS -m 5 http://127.0.0.1:$app_port/api/session" 2>/dev/null) || out=""
     [ -z "$out" ] || answered=1
-    if [ -n "$out" ] && printf '%s' "$out" | python3 -I -c '
+    mode=$(printf '%s' "$out" | session_mode) || mode=unknown
+    if [ "$mode" = multi-account ]; then
+      echo "mode: multi-account (account status is private; public login wait skipped)"
+      return 0
+    fi
+    if [ "$mode" = single-account ] && [ -n "$out" ] && printf '%s' "$out" | python3 -I -c '
 import json, sys
 try:
     s = json.load(sys.stdin)
@@ -557,7 +601,10 @@ def jdict(text):
         return None
     return x if isinstance(x, dict) else None
 s = jdict(v.get("session", ""))
-if s is not None:
+if s is not None and s.get("multi_account") is True:
+    print("mode: multi-account (account status is private)")
+    print("api stage: private (administrator saved-pass check required)")
+elif s is not None:
     if s.get("state") == "setup":
         print("owner: setup needed (no owner yet)")
     elif s.get("unlocked"):
@@ -622,6 +669,7 @@ elif want:
 
 cmd_restart() {
   local err rc=0
+  refuse_multi_restart
   err=$(rsh "systemctl --no-ask-password restart $svc" 2>&1) || rc=$?
   if [ "$rc" = 0 ]; then
     echo "restarted $svc without sudo"
@@ -635,6 +683,7 @@ cmd_restart() {
 
 cmd_sudo_restart() {
   local inv0 exitf
+  refuse_multi_restart
   inv0=$(invocation)
   exitf=$(cmd_window anki-review-restart "ssh -t -p $port $(q "$host") $(q "sudo systemctl restart $svc")")
   printf '%s\n' "$inv0" >"${exitf%/exit}/invocation"
@@ -654,7 +703,10 @@ import json, os, sys
 what = os.environ["WHAT"]
 try:
     s = json.load(sys.stdin)
-    print(what + ": 200, state %s, %s" % (s["state"], "unlocked" if s.get("unlocked") else "locked"))
+    if isinstance(s, dict) and s.get("multi_account") is True:
+        print(what + ": 200, multi-account (account status private)")
+    else:
+        print(what + ": 200, state %s, %s" % (s["state"], "unlocked" if s.get("unlocked") else "locked"))
 except (ValueError, KeyError, TypeError):
     print(what + ": 200 but not the API (a login page of the proxy?): not a failure")
 '

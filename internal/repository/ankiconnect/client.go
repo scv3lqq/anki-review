@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,12 +15,13 @@ import (
 )
 
 const (
-	apiVersion   = 6
-	lockRetries  = 20
-	lockWait     = time.Second
-	httpTimeout  = 2 * time.Minute
-	lockedMarker = "lifecycle operation is active"
-	queueMarker  = "not at top of queue"
+	apiVersion       = 6
+	maxResponseBytes = 24 << 20
+	lockRetries      = 20
+	lockWait         = time.Second
+	httpTimeout      = 2 * time.Minute
+	lockedMarker     = "lifecycle operation is active"
+	queueMarker      = "not at top of queue"
 	// AnkiConnect's answer when apiKey is set and the request doesn't carry it
 	keyMarker = "valid api key must be provided"
 )
@@ -32,6 +34,8 @@ type Client struct {
 	http *http.Client
 	// lockWait is a field so tests don't wait a second per retry
 	lockWait time.Duration
+	// responseLimit can be lowered in offline tests; production responses are always capped.
+	responseLimit int64
 }
 
 // New returns a client for the AnkiConnect endpoint. key is read on every call: it is AnkiConnect's
@@ -121,8 +125,19 @@ func (c *Client) post(ctx context.Context, body []byte) (*response, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("post: status %d", resp.StatusCode)
 	}
+	limit := c.responseLimit
+	if limit <= 0 || limit > maxResponseBytes {
+		limit = maxResponseBytes
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("response exceeds %d bytes", limit)
+	}
 	var r response
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &r, nil

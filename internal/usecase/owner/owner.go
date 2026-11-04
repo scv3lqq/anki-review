@@ -88,10 +88,12 @@ type Checker interface {
 
 // Options tune a UseCase; zero values get defaults.
 type Options struct {
-	DefaultProvider string
-	Log             zerolog.Logger
-	Now             func() time.Time
-	NewToken        func() string
+	// RequireCredentials disables the legacy Claude host-login fallback.
+	RequireCredentials bool
+	DefaultProvider    string
+	Log                zerolog.Logger
+	Now                func() time.Time
+	NewToken           func() string
 	// OnUnlock runs once, on the first unlock. Its error fails that login and leaves the server locked.
 	OnUnlock func(domain.Secrets) error
 }
@@ -185,6 +187,23 @@ func New(vault Vault, checker Checker, opts Options) (*UseCase, error) {
 	}, nil
 }
 
+// RefreshVault discovers a file that a failed durable write may have left behind.
+// It only promotes setup to login: existing sessions and unlocked secrets stay intact.
+func (u *UseCase) RefreshVault() error {
+	u.setupMu.Lock()
+	defer u.setupMu.Unlock()
+	exists, err := u.vault.Exists()
+	if err != nil {
+		return fmt.Errorf("owner: refresh vault metadata: %w", err)
+	}
+	if exists {
+		u.mu.Lock()
+		u.hasVault = true
+		u.mu.Unlock()
+	}
+	return nil
+}
+
 // Status tells the page where the owner stands for the session token.
 func (u *UseCase) Status(token string) Status {
 	u.mu.Lock()
@@ -195,7 +214,10 @@ func (u *UseCase) Status(token string) Status {
 	st := Status{State: StateLogin, Unlocked: u.unlocked}
 	if u.unlocked {
 		st.GraderProvider = providerOrClaude(u.secrets.GraderProvider)
-		st.GraderConnected = st.GraderProvider == "claude" || u.secrets.CodexAuth != ""
+		st.GraderConnected = u.secrets.CodexAuth != ""
+		if st.GraderProvider == "claude" {
+			st.GraderConnected = !u.opts.RequireCredentials || u.secrets.ClaudeToken != ""
+		}
 	}
 	if s, ok := u.sessionLocked(token); ok {
 		st.State, st.User = StateReady, s.user
@@ -256,6 +278,9 @@ func (u *UseCase) Setup(ctx context.Context, client string, in SetupInput) (stri
 	}
 	claude, err := cleanClaude(in.ClaudeToken)
 	if err != nil {
+		return "", err
+	}
+	if err := u.requireClaude(provider, claude); err != nil {
 		return "", err
 	}
 	anki, err := cleanAnkiKey(in.AnkiKey)
@@ -401,7 +426,10 @@ func (u *UseCase) updateGrader(ctx context.Context, next domain.Secrets, in Upda
 	if in.CodexAuth != nil {
 		next.CodexAuth = *in.CodexAuth
 	}
-	if claude != nil || (provider == "claude" && in.GraderProvider != nil) {
+	if err := u.requireClaude(provider, next.ClaudeToken); err != nil {
+		return next, err
+	}
+	if (claude != nil && (!u.opts.RequireCredentials || *claude != "" || provider == "claude")) || (provider == "claude" && in.GraderProvider != nil) {
 		if _, err := u.checkGrader(ctx, "claude", next.ClaudeToken); err != nil {
 			return next, err
 		}
@@ -491,7 +519,17 @@ func checkProvider(provider string) error {
 	return nil
 }
 
+func (u *UseCase) requireClaude(provider, credential string) error {
+	if u.opts.RequireCredentials && provider == "claude" && credential == "" {
+		return &FieldError{Field: "claude_token", Message: "Enter your own Claude token"}
+	}
+	return nil
+}
+
 func (u *UseCase) checkGrader(ctx context.Context, provider, credential string) (string, error) {
+	if err := u.requireClaude(provider, credential); err != nil {
+		return "", err
+	}
 	if provider == "codex" && credential == "" {
 		return "", &FieldError{Field: "codex_auth", Message: "Import auth.json from a dedicated Codex ChatGPT login"}
 	}

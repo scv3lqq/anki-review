@@ -9,10 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -21,11 +25,12 @@ import (
 )
 
 const (
-	fileName = "vault.json"
-	version  = 1
-	dirMode  = 0o700
-	saltSize = 16
-	kdfName  = "argon2id"
+	fileName         = "vault.json"
+	maxMetadataBytes = 1 << 20
+	version          = 1
+	dirMode          = 0o700
+	saltSize         = 16
+	kdfName          = "argon2id"
 	// the AAD binds the sealed tokens to this file format and to the login
 	aadPrefix = "anki-review/vault/v1\x00"
 	keySize   = chacha20poly1305.KeySize
@@ -113,6 +118,40 @@ func (v *Vault) Exists() (bool, error) {
 	default:
 		return false, fmt.Errorf("vault: stat: %w", err)
 	}
+}
+
+// User reads validated public metadata without deriving a key, unlocking, or replacing the vault.
+func (v *Vault) User() (string, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	info, err := os.Lstat(v.path)
+	if err != nil {
+		return "", fmt.Errorf("vault: metadata: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxMetadataBytes {
+		return "", damaged("", "invalid metadata file size or type")
+	}
+	f, err := os.Open(v.path)
+	if err != nil {
+		return "", fmt.Errorf("vault: metadata open: %w", err)
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxMetadataBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("vault: metadata read: %w", err)
+	}
+	if len(raw) > maxMetadataBytes {
+		return "", damaged("", "metadata exceeds size limit")
+	}
+	envelope, _, _, _, err := parse(raw)
+	if err != nil {
+		return "", err
+	}
+	user := envelope.User
+	if !utf8.ValidString(user) || strings.TrimSpace(user) != user || utf8.RuneCountInString(user) > 64 || strings.IndexFunc(user, unicode.IsControl) >= 0 {
+		return "", damaged("", "invalid metadata login")
+	}
+	return user, nil
 }
 
 // unlockHandle retains only the derived key and public envelope metadata, never the password.

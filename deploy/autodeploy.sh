@@ -93,6 +93,17 @@ answers() {
   return 1
 }
 
+session_mode() {
+  jq -er '
+    if type != "object" then error("invalid session")
+    elif (.state | type != "string" or (IN("setup", "login", "ready") | not)) then error("invalid state")
+    elif has("multi_account") and (.multi_account | type != "boolean") then error("invalid mode")
+    elif has("unlocked") and (.unlocked | type != "boolean") then error("invalid unlock status")
+    elif has("stage") and (.stage | type != "string" or (IN("idle", "input", "checking", "results", "confirmed", "written") | not)) then error("invalid stage")
+    elif .multi_account == true then "multi" else "single" end
+  '
+}
+
 # Only the deploy user's settings could steer git and go here, and neither should.
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
 export GOENV=off GOTOOLCHAIN=auto GOFLAGS=-mod=readonly GOPATH="$dir/.go" GOCACHE="$dir/.cache/go-build"
@@ -104,6 +115,12 @@ fi
 git -C "$src" remote set-url origin "$repo"
 git -C "$src" fetch --quiet --prune origin "+refs/heads/$branch:refs/remotes/origin/$branch"
 head="$(git -C "$src" rev-parse --verify "refs/remotes/origin/$branch^{commit}")"
+# Public multi-account status intentionally hides active passes. Hold before builds,
+# unchanged-binary recording, or provider-only updates can advance deployment state.
+session="$(curl -fsS -m 5 "$api/api/session" 2>/dev/null)" || hold "no answer from $api/api/session"
+mode="$(session_mode <<<"$session" 2>/dev/null)" ||
+  hold "no valid session status from $api/api/session"
+[[ $mode != multi && -z ${ACCOUNT_SOCKET:-} ]] || hold "multi-account mode requires explicit maintenance of both binaries"
 [[ $head != "$(state_get deployed)" && $head != "$(state_get rejected)" ]] || exit 0
 
 # The signature covers the tree the build uses, so the keys in DIR decide what runs, not GitHub.
@@ -157,6 +174,8 @@ if [[ $want == "$have" ]]; then
 fi
 
 session="$(curl -fsS -m 5 "$api/api/session" 2>/dev/null)" || hold "no answer from $api/api/session"
+mode="$(session_mode <<<"$session" 2>/dev/null)" || hold "no valid session status from $api/api/session"
+[[ $mode != multi ]] || hold "multi-account mode requires explicit maintenance of both binaries"
 # A locked server resumes its pass only after a login anyway; an unlocked one is asked about first.
 verdict="$(jq -r 'if .state == "setup" or .unlocked != true or ((.stage // "idle") | IN("idle", "written"))
   then "go" else "a pass is in progress (stage \(.stage))" end' <<<"$session" 2>/dev/null)" ||

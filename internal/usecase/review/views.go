@@ -4,10 +4,11 @@ import "github.com/scv3lqq/anki-review/internal/domain"
 
 // CardView is a card as the page sees it before grading: no answer key.
 type CardView struct {
-	N        int    `json:"n"`
-	Question string `json:"question"`
-	IsNew    bool   `json:"isNew"`
-	Deck     string `json:"deck"`
+	N            int    `json:"n"`
+	Question     string `json:"question"`
+	QuestionHTML string `json:"question_html,omitempty"`
+	IsNew        bool   `json:"isNew"`
+	Deck         string `json:"deck"`
 }
 
 // CardsView is the current pass for the answer screen.
@@ -26,17 +27,19 @@ type CardsView struct {
 // ResultItem is a card with its answer and, unless skipped, the grader's verdict and the card's back.
 // A skipped card stays due, so its back is withheld.
 type ResultItem struct {
-	N         int                     `json:"n"`
-	Question  string                  `json:"question"`
-	IsNew     bool                    `json:"isNew"`
-	Answer    string                  `json:"answer"`
-	Skipped   bool                    `json:"skipped,omitempty"`
-	Grade     domain.Grade            `json:"grade,omitempty"`
-	Mistake   string                  `json:"mistake,omitempty"`
-	Back      string                  `json:"back,omitempty"`
-	Note      string                  `json:"note,omitempty"`
-	Topic     string                  `json:"topic,omitempty"`
-	Intervals map[domain.Grade]string `json:"intervals,omitempty"`
+	N            int                     `json:"n"`
+	Question     string                  `json:"question"`
+	QuestionHTML string                  `json:"question_html,omitempty"`
+	BackHTML     string                  `json:"back_html,omitempty"`
+	IsNew        bool                    `json:"isNew"`
+	Answer       string                  `json:"answer"`
+	Skipped      bool                    `json:"skipped,omitempty"`
+	Grade        domain.Grade            `json:"grade,omitempty"`
+	Mistake      string                  `json:"mistake,omitempty"`
+	Back         string                  `json:"back,omitempty"`
+	Note         string                  `json:"note,omitempty"`
+	Topic        string                  `json:"topic,omitempty"`
+	Intervals    map[domain.Grade]string `json:"intervals,omitempty"`
 }
 
 // ResultsView is the graded pass for the results screen.
@@ -57,7 +60,7 @@ func cardsView(p *domain.Pass, grading bool) CardsView {
 	}
 	v.Cards = make([]CardView, len(p.Items))
 	for i, it := range p.Items {
-		v.Cards[i] = CardView{N: it.N, Question: it.Question, IsNew: it.IsNew, Deck: it.Deck}
+		v.Cards[i] = CardView{N: it.N, Question: it.Question, QuestionHTML: it.QuestionHTML, IsNew: it.IsNew, Deck: it.Deck}
 		if it.IsNew {
 			v.Fresh++
 		}
@@ -79,7 +82,7 @@ func resultsView(p *domain.Pass) ResultsView {
 		results[r.N] = r
 	}
 	for i, it := range p.Items {
-		item := ResultItem{N: it.N, Question: it.Question, IsNew: it.IsNew, Answer: answers[it.N]}
+		item := ResultItem{N: it.N, Question: it.Question, QuestionHTML: it.QuestionHTML, IsNew: it.IsNew, Answer: answers[it.N]}
 		r, graded := results[it.N]
 		if !graded {
 			item.Skipped = true
@@ -91,6 +94,7 @@ func resultsView(p *domain.Pass) ResultsView {
 		if p.Kind == domain.KindKnowledge {
 			topic = it.Topic
 		}
+		item.BackHTML = it.BackHTML
 		item.Grade, item.Mistake, item.Back, item.Note, item.Topic, item.Intervals = r.Grade, r.Mistake, it.Back, r.Note, topic, it.Intervals
 		v.Items[i] = item
 	}

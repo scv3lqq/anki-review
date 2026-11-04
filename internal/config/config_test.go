@@ -10,6 +10,7 @@ import (
 
 func TestLoad(t *testing.T) {
 	defaults := Config{
+		MaxAccounts:    4,
 		Port:           8767,
 		DataDir:        "data",
 		KnowledgeDecks: []string{"Tech", "Career"},

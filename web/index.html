@@ -31,6 +31,14 @@
   <section id="start" hidden>
     <ol class="decks" id="decks"></ol>
     <p class="empty" id="start-empty" hidden>Nothing to review today.</p>
+    <details class="collection-tools" id="start-import">
+      <summary>Import cards</summary>
+      <p class="note">Import an .apkg package up to 8 MiB. Export with Support older Anki versions enabled. Models, media and scheduling are kept.</p>
+      <div class="field"><label for="start-import-file">Anki package (.apkg)</label><input type="file" id="start-import-file" accept=".apkg"></div>
+      <button type="button" class="btn ghost" id="start-import-submit">Import cards</button>
+      <p class="status" id="start-import-status" role="status" hidden></p>
+    </details>
+
   </section>
 
   <section id="card-view" hidden>
@@ -79,8 +87,8 @@
   </section>
 
   <section id="setup" class="auth" hidden>
-    <h2>Set up</h2>
-    <p class="lede">Create the owner login. Choose a grading provider. The server checks the credentials, then encrypts them under this password.</p>
+    <h2 id="setup-title">Set up</h2>
+    <p class="lede" id="setup-lede">Create the owner login. Choose a grading provider. The server checks the credentials, then encrypts them under this password.</p>
     <form id="setup-form" novalidate>
       <div class="field">
         <label for="setup-user">Login</label>
@@ -121,7 +129,7 @@
         <p class="field-error" id="setup-claude-error" hidden></p>
         <div data-help="claude"></div>
       </div>
-      <div class="field">
+      <div class="field" id="setup-anki-field">
         <label for="setup-anki">AnkiConnect key</label>
         <div class="input-row">
           <input id="setup-anki" class="mono" name="anki_key" type="password" autocomplete="off" spellcheck="false" aria-describedby="setup-anki-error">
@@ -133,13 +141,14 @@
       <div class="auth-actions">
         <button type="submit" class="btn primary" id="setup-submit">Set up</button>
         <p class="status" id="setup-status" hidden></p>
+        <button type="button" class="btn ghost" id="registration-login" hidden>Already registered? Log in</button>
       </div>
     </form>
   </section>
 
   <section id="login" class="auth" hidden>
     <h2>Log in</h2>
-    <p class="lede">The server was restarted or you logged out. Logging in unlocks grading.</p>
+    <p class="lede">Log in to unlock your account and continue your saved batch.</p>
     <form id="login-form" novalidate>
       <div class="field">
         <label for="login-user">Login</label>
@@ -200,7 +209,7 @@
         <p class="field-error" id="set-claude-error" hidden></p>
         <div data-help="claude"></div>
       </div>
-      <div class="field">
+      <div class="field" id="set-anki-field">
         <label for="set-anki">New AnkiConnect key (optional)</label>
         <div class="input-row">
           <input id="set-anki" class="mono" name="anki_key" type="password" autocomplete="off" spellcheck="false" aria-describedby="set-anki-error">
@@ -215,6 +224,29 @@
         <p class="status" id="set-status" hidden></p>
       </div>
     </form>
+    <section class="account-tools" id="preferences">
+      <h3>Knowledge decks</h3>
+      <p class="note">Top-level decks graded by meaning. Other decks test the exact word or phrase. Changes apply to your next batch.</p>
+      <form id="preferences-form" novalidate>
+        <div class="field"><label for="knowledge-decks">One top-level deck name per line</label><textarea id="knowledge-decks" rows="4" spellcheck="false" aria-describedby="preferences-status"></textarea></div>
+        <button type="submit" class="btn ghost" id="preferences-save">Save deck preferences</button>
+        <p class="status" id="preferences-status" role="status" hidden></p>
+      </form>
+    </section>
+    <details class="collection-tools" id="set-import">
+      <summary>Import cards</summary>
+      <p class="note">Import an .apkg package up to 8 MiB. Export with Support older Anki versions enabled. Models, media and scheduling are kept.</p>
+      <div class="field"><label for="set-import-file">Anki package (.apkg)</label><input type="file" id="set-import-file" accept=".apkg"></div>
+      <button type="button" class="btn ghost" id="set-import-submit">Import cards</button>
+      <p class="status" id="set-import-status" role="status" hidden></p>
+    </details>
+    <section class="account-tools" id="invitations" hidden>
+      <h3>Invite a friend</h3>
+      <p class="note">Your friend creates their own account, adds their own grading credentials and imports their own cards. Invitations expire after 24 hours and can be used once.</p>
+      <button type="button" class="btn ghost" id="invite-create">Create invitation</button>
+      <div class="field" id="invite-link-field" hidden><label for="invite-link">Invitation link</label><input id="invite-link" readonly autocomplete="off"><button type="button" class="btn ghost" id="invite-copy">Copy invitation link</button></div>
+      <p class="status" id="invite-status" role="status" hidden></p>
+    </section>
   </section>
 </main>
 
@@ -256,7 +288,7 @@
       <li>On a computer with Claude Code, where <code>claude</code> is logged in to your Claude account (Pro, Max, Team or Enterprise), run <code>claude setup-token</code> in a terminal.</li>
       <li>It opens the browser: approve the access. The terminal then prints a token that starts with <code>sk-ant-oat01-</code>. It is valid for one year and grading uses your subscription.</li>
       <li>Paste it here. An Anthropic API key (<code>sk-ant-api03-...</code>) works too, billed per use.</li>
-      <li>Leave it empty only when this server runs on your own computer and <code>claude</code> already works there for the account that runs the server.</li>
+      <li class="legacy-login-help">Leave it empty only when this server runs on your own computer and <code>claude</code> already works there for the account that runs the server.</li>
     </ul>
   </details>
 </template>
@@ -279,7 +311,7 @@
 </template>
 
 <template id="tpl-password">
-  <p class="note">At least 12 characters. It encrypts credentials on the server: they are decrypted only in the server's memory after you log in, so a copy of its disk doesn't reveal them. After a server restart, log in again to unlock grading. A forgotten password can't be recovered: delete <code>vault.json</code> in the server's data directory and set up again.</p>
+  <p class="note">At least 12 characters. It encrypts credentials on the server: they are decrypted only in the server's memory after you log in, so a copy of its disk doesn't reveal them. After a server restart, log in again to unlock grading. A forgotten password cannot be recovered. Ask the service owner for help.</p>
 </template>
 </body>
 </html>

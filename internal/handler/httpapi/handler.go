@@ -72,6 +72,7 @@ var (
 		"font-src https://fonts.gstatic.com",
 		"img-src 'self'",
 		"connect-src 'self'",
+		"frame-src 'self'",
 		"base-uri 'none'",
 		"form-action 'none'",
 		"frame-ancestors 'none'",
@@ -88,17 +89,24 @@ type asset struct {
 }
 
 type handler struct {
-	own    Owner
-	review func() Service
-	log    zerolog.Logger
-	assets map[string]asset
+	importLease chan struct{}
+	opts        Options
+	own         Owner
+	review      func() Service
+	log         zerolog.Logger
+	assets      map[string]asset
 }
 
 // New returns the routes behind the host guard. static must hold index.html, app.js, style.css and
 // icon.svg.
 // review returns the review service while the server is unlocked and nil while it is locked.
 func New(own Owner, review func() Service, static fs.FS, log zerolog.Logger) (http.Handler, error) {
-	h := &handler{own: own, review: review, log: log, assets: make(map[string]asset, len(assetNames))}
+	return NewWithOptions(own, review, static, log, Options{})
+}
+
+// NewWithOptions adds immutable account metadata and collection operations to the existing API.
+func NewWithOptions(own Owner, review func() Service, static fs.FS, log zerolog.Logger, opts Options) (http.Handler, error) {
+	h := &handler{own: own, review: review, log: log, opts: opts, assets: make(map[string]asset, len(assetNames)), importLease: make(chan struct{}, 1)}
 	for _, name := range assetNames {
 		body, err := fs.ReadFile(static, name)
 		if err != nil {
@@ -127,6 +135,11 @@ func New(own Owner, review func() Service, static fs.FS, log zerolog.Logger) (ht
 	mux.HandleFunc("POST /api/regrade", h.reviewing(h.regrade))
 	mux.HandleFunc("POST /api/confirm", h.reviewing(h.confirm))
 	mux.HandleFunc("POST /api/reset", h.reviewing(h.reset))
+	mux.HandleFunc("POST /api/import", h.authed(h.importPackage))
+	mux.HandleFunc("GET /api/preferences", h.authed(h.preferences))
+	mux.HandleFunc("POST /api/preferences", h.authed(h.savePreferences))
+	mux.HandleFunc("GET /api/render", h.reviewing(h.render))
+	mux.HandleFunc("GET /api/media/{name}", h.authed(h.media))
 	return guard(mux), nil
 }
 
@@ -142,7 +155,7 @@ func guard(next http.Handler) http.Handler {
 			return
 		}
 		// a JSON body forces a CORS preflight this server never answers, so other sites can't post here
-		if r.Method == http.MethodPost && !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		if r.Method == http.MethodPost && (r.URL.Path != "/api/import" || r.Header.Get("Content-Type") != "application/octet-stream") && !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 			writeJSON(w, http.StatusUnsupportedMediaType, errorBody{Error: "json only"})
 			return
 		}
@@ -177,6 +190,10 @@ func (h *handler) fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, review.ErrUnknownDeck):
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: err.Error()})
 	case errors.Is(err, domain.ErrAnki):
+		if h.opts.Managed {
+			writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: collectionUnavailable})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, errorBody{Error: err.Error()})
 	default:
 		h.log.Error().Err(err).Msg("request failed")
@@ -330,6 +347,9 @@ func (h *handler) authed(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusUnauthorized, errorBody{Error: "Log in first", Code: codeLogin})
 			return
 		}
+		if !h.expectedAccount(w, r) {
+			return
+		}
 		next(w, r)
 	}
 }
@@ -402,6 +422,10 @@ func (h *handler) ownerFail(w http.ResponseWriter, err error) {
 	var throttled *owner.ThrottledError
 	switch {
 	case errors.As(err, &field):
+		if h.opts.Managed && field.Field == "anki_key" {
+			writeJSON(w, http.StatusServiceUnavailable, errorBody{Error: collectionUnavailable})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: field.Message, Field: field.Field})
 	case errors.As(err, &throttled):
 		writeJSON(w, http.StatusTooManyRequests, errorBody{Error: throttled.Error(), Code: codeThrottled})
@@ -423,6 +447,9 @@ func (h *handler) ownerFail(w http.ResponseWriter, err error) {
 }
 
 func (h *handler) session(w http.ResponseWriter, r *http.Request) {
+	if h.own.Authorized(sessionToken(r)) && !h.expectedAccount(w, r) {
+		return
+	}
 	st := h.own.Status(sessionToken(r))
 	body := map[string]any{"state": st.State, "unlocked": st.Unlocked}
 	if st.GraderProvider != "" {
@@ -431,6 +458,12 @@ func (h *handler) session(w http.ResponseWriter, r *http.Request) {
 	}
 	if st.State == owner.StateReady {
 		body["user"] = st.User
+		if h.opts.AccountID != "" {
+			body["account_id"] = h.opts.AccountID
+			body["multi_account"] = h.opts.MultiAccount
+			body["managed"] = h.opts.Managed
+			body["is_owner"] = h.opts.IsOwner
+		}
 	}
 	if st.Unlocked {
 		if svc := h.review(); svc != nil {
@@ -491,6 +524,8 @@ func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 type settingsRequest struct {
+	AnkiURL        *string `json:"anki_url"`
+	AnkiConnectURL *string `json:"anki_connect_url"`
 	GraderProvider *string `json:"grader_provider"`
 	CodexAuth      *string `json:"codex_auth"`
 	Password       string  `json:"password"`
@@ -502,6 +537,10 @@ type settingsRequest struct {
 func (h *handler) settings(w http.ResponseWriter, r *http.Request) {
 	var req settingsRequest
 	if !decode(w, r, &req) {
+		return
+	}
+	if h.opts.Managed && (req.AnkiKey != nil || req.AnkiURL != nil || req.AnkiConnectURL != nil) {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "Collection connection settings are managed by the server"})
 		return
 	}
 	err := h.own.Update(r.Context(), sessionToken(r), owner.UpdateInput{
