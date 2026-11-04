@@ -64,7 +64,7 @@ for tool in /usr/bin/docker /usr/bin/findmnt /usr/bin/mount /usr/bin/umount /usr
 done
 export DOCKER_HOST=unix:///var/run/docker.sock
 unset DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH
-image=anki-desktop:26.09.3-ac26.10.14.0
+image=anki-desktop:26.09.3-ac26.10.14.0-audio1
 /usr/bin/docker image inspect "$image" >/dev/null || fail "build the pinned Anki image first, with ANKI_UID/ANKI_GID matching this daemon"
 probe=(/usr/bin/docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --memory 16m --memory-swap 16m --cpus 0.1 --pids-limit 16 --entrypoint /usr/bin/id "$image")
 image_uid=$("${probe[@]}" -u) || fail "cannot check pinned image UID"

@@ -201,11 +201,33 @@ waits on its own.
 
 1. `make check` (or `go test ./...`), `make build-linux`, `S precheck update` (no service from this
    `DEPLOY_DIR`: mode `server`).
-2. `S kit-diff`: only `anki/` files differ: `S upload` and `S up` (no sudo). `install.sh`,
-   `smoke.sh`, `provider.sh`, `test-provider.sh` or the unit differ: mode `server` (one sudo password).
-3. `S status`: a pass in progress (see Pass in progress) is asked about first. A `sync:` line that
-   differs from `DEPLOY_SYNC` (`sync: AnkiWeb` with `DEPLOY_SYNC=self-hosted`): Switching to
-   self-hosted, not a plain update.
+2. `S status` before `S kit-diff`, any upload or image/setup command. Detect
+   `mode: multi-account` or enabled `ACCOUNT_SOCKET` first: stop the ordinary update
+   flow and use Multi-account maintenance below and deploy/README.md's native audio
+   image maintenance. If account mode cannot be established, stop before mutations.
+   Public multi-account status cannot prove saved passes idle: stop HTTP for private
+   `check-passes.py` inspection of every account, then stop the broker and take the
+   account-aware offline backups before image/binary changes. For a single owner,
+   follow Pass in progress before a restart; retain matching old binaries, kit,
+   image and settings for rollback. A `sync:` line differing
+   from `DEPLOY_SYNC` requires Switching to self-hosted, not a plain update.
+3. Only after those checks, run `S kit-diff`. For an audio-only `anki/` change,
+   stop HTTP and gracefully stop the owner desktop, then take consistent
+   application/collection backups before `S upload` transfers the matching kit.
+   Refresh only the stopped desktop as the deploy user with the recorded UID/GID/port environment:
+   `docker compose --project-directory DIR/anki -f DIR/anki/compose.yaml up -d --build --no-deps anki`.
+   Keep the same named collection volume, endpoint, secrets, network and sync settings;
+   do not restart sync for an audio-only update. Do not run `S up` for an audio-only update.
+   The pinned native adapter resolves HTML markers using the same native render's
+   ordered AV lists, never guessed note fields; unsupported TTS displays `Audio unavailable`.
+   Do not reset the owner's pass or unlock automatically to refresh saved HTML:
+   existing saved HTML stays intact until the normal next pass. Follow the matching
+   image/binary rollback procedure in deploy/README.md. For an audio-only desktop
+   refresh, start the matching HTTP binary, verify public status while locked and
+   finish here without a login request or `S wait-setup`. For an ordinary full setup
+   change to `anki/`, use mode `server` and its existing `S up` semantics after these
+   checks. `install.sh`, `smoke.sh`, `provider.sh`, `test-provider.sh` or unit changes
+   also use mode `server` (one sudo password); multi-account mode always uses explicit maintenance.
 4. `S upload-bin`, then `S restart`. Refused (an older deploy without the rule, or no polkit): `S
    sudo-restart` opens a window for the sudo password; run and poll `S wait-install <file>` in a
    process session. Inspect the printed `window ended, exit code N`; the helper's own exit code
@@ -393,6 +415,18 @@ that the server contains the pending client reviews. Print only counts and safe 
 ## Multi-account maintenance
 
 When `ACCOUNT_SOCKET` is enabled, follow the multi-account section of deploy/README.md.
+For the pinned native audio image, stop HTTP and the broker after saved-pass checks,
+then complete the offline backups before image changes. Stop/remove only exact,
+verified managed guest containers; retain their volumes, networks, backing files,
+keys and reservations. Refresh the owner desktop with its existing named volume,
+secrets, endpoint, preferences and sync settings using desktop-only compose
+`--no-deps`; leave sync running for this audio-only change. Install the matching new
+broker/image and let its reconciliation call `Ensure` on existing reservations to
+recreate the removed guests without replacing their storage. Preserve all saved
+passes and vaults, never reset the owner's pass or unlock accounts automatically.
+Existing saved HTML stays intact until the normal next pass. Keep the matching old
+kit, image and both binaries for rollback as described in deploy/README.md.
+
 The ordinary wait-setup/restart/status assumptions do not apply: unauthenticated
 status intentionally omits every account's unlocked/stage. Helpers must detect and
 report multi-account mode, refuse automated restart and stop waiting for public unlock.

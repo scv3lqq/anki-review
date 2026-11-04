@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -307,6 +309,9 @@ esac""",
             "anki/compose.yaml",
             "anki/entrypoint.sh",
             "anki/setup-profile.py",
+            "anki/native_audio.py",
+            "anki/patch_ankiconnect.py",
+            "anki/test-native-audio.py",
             "anki/syncserver.sh",
             "anki/up.sh",
         ]
@@ -464,6 +469,196 @@ esac""",
             self.assertFalse(
                 self.calls.exists(), "ordinary installer mutated a multi-account host"
             )
+
+
+class NativeAudioInstallationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        self.directory = Path(self.scratch.name)
+        self.commands = self.directory / "commands"
+        self.commands.mkdir()
+        self.base = self.directory / "profile"
+        self.base.mkdir()
+        self.calls = self.directory / "calls"
+        self.archive = self.directory / "release.tar.gz"
+        with tarfile.open(self.archive, "w:gz") as archive:
+            for filename, raw in [
+                ("__init__.py", b"fixture plugin"),
+                ("services.py", b"original services"),
+            ]:
+                member = tarfile.TarInfo("release/plugin/" + filename)
+                member.size = len(raw)
+                archive.addfile(member, io.BytesIO(raw))
+        for name in [
+            "dirname",
+            "sed",
+            "mktemp",
+            "rm",
+            "tar",
+            "gzip",
+            "mkdir",
+            "cp",
+            "mv",
+        ]:
+            executable = shutil.which(name)
+            self.assertIsNotNone(executable)
+            (self.commands / name).symlink_to(str(executable))
+        self.env = {
+            "PATH": str(self.commands),
+            "HOME": str(self.directory),
+            "TMPDIR": str(self.directory),
+            "ANKI_BASE": str(self.base),
+            "CALL_LOG": str(self.calls),
+            "ARCHIVE_FIXTURE": str(self.archive),
+        }
+        self.command(
+            "curl",
+            """printf 'DOWNLOAD\n' >> "$CALL_LOG"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then shift; output=$1; fi
+  shift
+done
+cp "$ARCHIVE_FIXTURE" "$output"
+""",
+        )
+        self.command(
+            "sha256sum",
+            "printf '%s  fixture\n' '0caee0ff09f60b902e2e324bcc63bece1ffdca24249f53dfb53539cedb26c894'",
+        )
+
+    def command(self, name: str, body: str) -> None:
+        path = self.commands / name
+        path.write_text("#!/bin/bash\nset -eu\n" + body + "\n")
+        path.chmod(0o755)
+
+    def installer(self, tree: str) -> Path:
+        destination = self.directory / tree / "skills/setup-anki-review"
+        destination.mkdir(parents=True, exist_ok=True)
+        script = destination / "install-ankiconnect.sh"
+        shutil.copyfile(
+            ROOT / tree / "skills/setup-anki-review/install-ankiconnect.sh", script
+        )
+        inputs = self.directory / "deploy/anki"
+        inputs.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / "deploy/anki/Dockerfile", inputs / "Dockerfile")
+        (inputs / "native_audio.py").write_text("fixture native adapter\n")
+        (inputs / "patch_ankiconnect.py").write_text(
+            "import os,pathlib,shutil,sys\n"
+            "with pathlib.Path(os.environ['CALL_LOG']).open('a') as stream: stream.write('PATCH\\n')\n"
+            "plugin=pathlib.Path(sys.argv[1])\n"
+            "(plugin/'services.py').write_text('patched services')\n"
+            "if os.environ.get('PATCH_FAIL') == '1': sys.exit(19)\n"
+            "shutil.copyfile(pathlib.Path(__file__).with_name('native_audio.py'),plugin/'native_audio.py')\n"
+        )
+        return script
+
+    def run_installer(self, tree: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["/bin/bash", str(self.installer(tree))],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+
+    def test_missing_and_old_python_fail_before_download_or_publication(self) -> None:
+        for tree in [".agents", ".claude"]:
+            for prerequisite in ["missing", "old"]:
+                with self.subTest(tree=tree, prerequisite=prerequisite):
+                    shutil.rmtree(self.base / "addons21", ignore_errors=True)
+                    python = self.commands / "python3"
+                    python.unlink(missing_ok=True)
+                    if prerequisite == "old":
+                        self.command("python3", "exit 1")
+                    self.calls.unlink(missing_ok=True)
+                    completed = self.run_installer(tree)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn("Python 3.11 or newer is required", completed.stderr)
+                    self.assertFalse(
+                        self.calls.exists(),
+                        "prerequisite failure reached download or patcher",
+                    )
+                    self.assertFalse(
+                        (self.base / "addons21").exists(),
+                        "prerequisite failure published add-on state",
+                    )
+
+    def test_patcher_failure_never_publishes_addon(self) -> None:
+        (self.commands / "python3").symlink_to(sys.executable)
+        self.env["PATCH_FAIL"] = "1"
+        for tree in [".agents", ".claude"]:
+            with self.subTest(tree=tree):
+                shutil.rmtree(self.base / "addons21", ignore_errors=True)
+                self.calls.unlink(missing_ok=True)
+                completed = self.run_installer(tree)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("PATCH", self.calls.read_text())
+                self.assertFalse(
+                    (self.base / "addons21").exists(),
+                    "failed private patch published add-on state",
+                )
+                self.assertEqual(list(self.directory.glob("ankiconnect.*")), [])
+
+    def test_success_publishes_only_patched_addon_atomically(self) -> None:
+        (self.commands / "python3").symlink_to(sys.executable)
+        for tree in [".agents", ".claude"]:
+            with self.subTest(tree=tree):
+                shutil.rmtree(self.base / "addons21", ignore_errors=True)
+                completed = self.run_installer(tree)
+                self.assertEqual(
+                    completed.returncode, 0, completed.stdout + completed.stderr
+                )
+                destination = self.base / "addons21/2055492159"
+                self.assertEqual(
+                    (destination / "services.py").read_text(), "patched services"
+                )
+                self.assertEqual(
+                    (destination / "native_audio.py").read_text(),
+                    "fixture native adapter\n",
+                )
+                self.assertEqual(
+                    [path.name for path in destination.parent.iterdir()], ["2055492159"]
+                )
+                shutil.rmtree(destination.parent)
+
+    def test_existing_addon_is_refused_unchanged_before_download(self) -> None:
+        destination = self.base / "addons21/2055492159"
+        destination.mkdir(parents=True)
+        original = destination / "services.py"
+        original.write_bytes(b"existing unchanged")
+        for tree in [".agents", ".claude"]:
+            completed = self.run_installer(tree)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("exists already", completed.stderr)
+            self.assertEqual(original.read_bytes(), b"existing unchanged")
+            self.assertFalse(self.calls.exists())
+
+    def test_image_pins_and_docker_build_patch_contract_agree(self) -> None:
+        expected = "anki-desktop:26.09.3-ac26.10.14.0-audio1"
+        for filename in [
+            "deploy/anki/compose.yaml",
+            "deploy/install-multi-account.sh",
+            "internal/provisioner/service.go",
+        ]:
+            self.assertIn(expected, (ROOT / filename).read_text())
+        dockerfile = (ROOT / "deploy/anki/Dockerfile").read_text()
+        copied = next(
+            line
+            for line in dockerfile.splitlines()
+            if line.startswith("COPY --chmod=0755")
+        )
+        self.assertIn("native_audio.py", copied)
+        self.assertIn("patch_ankiconnect.py", copied)
+        self.assertIn(
+            "/opt/anki/python/bin/python3 -I /usr/local/lib/anki/patch_ankiconnect.py /opt/ankiconnect",
+            dockerfile,
+        )
+        self.assertIn(
+            "python3 -I deploy/anki/test-native-audio.py",
+            (ROOT / "Makefile").read_text(),
+        )
 
 
 if __name__ == "__main__":

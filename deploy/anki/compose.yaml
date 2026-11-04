@@ -11,7 +11,7 @@ services:
       args:
         ANKI_UID: ${ANKI_UID:-1000}
         ANKI_GID: ${ANKI_GID:-1000}
-    image: &image anki-desktop:26.09.3-ac26.10.14.0
+    image: &image anki-desktop:26.09.3-ac26.10.14.0-audio1
     # Use software rendering and bound the JavaScript heap to leave memory for Anki and Qt.
     environment:
       QTWEBENGINE_CHROMIUM_FLAGS: "--disable-gpu --js-flags=--max-old-space-size=128"

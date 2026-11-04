@@ -224,8 +224,46 @@ server's copy with a full upload. A copy of the server's data, from `DIR`:
   `install.sh`, which removes those two lines and says so, then set up on the page (step 6). A
   leftover `DIR/claude-token` from the old upload step is shredded by the same run.
 - Anki or AnkiConnect: change the version, commit and sha256 arguments in `anki/Dockerfile`, then
-  rerun `up.sh`. Host ports: `ANKI_CONNECT_PORT` (8765), `VNC_PORT` (5900) and `SYNC_PORT` (8766) for
-  `up.sh`; pass the same `ANKI_CONNECT_PORT` to `install.sh`.
+  rerun `up.sh` for an ordinary full setup. For an audio-only image update, use the maintenance
+  procedure below. Host ports: `ANKI_CONNECT_PORT` (8765), `VNC_PORT` (5900) and `SYNC_PORT` (8766)
+  for `up.sh`; pass the same `ANKI_CONNECT_PORT` to `install.sh`.
+
+### Native card audio and desktop image refresh
+
+The pinned image `anki-desktop:26.09.3-ac26.10.14.0-audio1` includes the owned
+`anki/native_audio.py` adapter. `anki/patch_ankiconnect.py` verifies the pinned
+AnkiConnect source hash and unique patch anchors before installing it. The adapter
+uses one native `Card.render_output()` for HTML and ordered question/answer AV lists,
+so template filters, conditionals and FrontSide retain Anki's ordering. Filenames
+come from those lists, never guessed from note fields. Question HTML cannot resolve
+answer-list audio. Unsupported TTS and invalid references display `Audio unavailable`;
+the adapter does not synthesize speech. Audio/video controls use the existing
+authenticated `/api/media/` endpoint after the Go sanitizer removes active content.
+
+An image refresh does not rewrite saved pass HTML: existing saved HTML stays intact
+until the normal next pass. Do not reset the owner's pass to refresh cached HTML,
+and do not unlock any account automatically. Unlocking can resume grading or
+confirmed writes. Detect multi-account mode before uploading or running setup;
+use [multi-account image maintenance](#native-audio-image-maintenance) for that mode.
+
+For a single owner, complete the setup skill's status/saved-pass checks first and
+resolve any active pass before maintenance. Retain matching previous binaries, kit,
+image ID/tag and configuration for rollback. Stop HTTP, gracefully stop the owner's
+desktop and take consistent application/collection backups before replacing anything.
+Record the existing named volume (`anki-data` in this kit), endpoint/ports, image
+UID/GID, network, secrets and sync settings. Preserve `data/vault.json`,
+`data/state.json`, preferences and the existing collection; never create a replacement
+profile or change sync direction. Keep the sync service running for an audio-only
+desktop refresh; use the documented sync backup procedure separately if needed.
+
+Transfer the matching kit, then, as the same deploy user with the recorded UID/GID
+and port environment, run only the desktop service:
+`docker compose --project-directory DIR/anki -f DIR/anki/compose.yaml up -d --build --no-deps anki`.
+Verify the recreated desktop has the same volume, secrets, network and endpoint,
+then start the matching HTTP binary and verify public status while locked.
+Do not run `S up` for an audio-only update. It uses the ordinary full setup path,
+which can also recreate or stop the sync service. Roll back with the matching old
+kit/image and binary while HTTP and the desktop are stopped, retaining the same data.
 
 ## Auto-deploy
 
@@ -393,6 +431,43 @@ previous binaries/configuration and remove `ACCOUNT_SOCKET` from HTTP to return
 to single-account operation. Keep all guest registry/directories and backing storage
 for recovery. The owner remains on the original endpoint/volume. Never restore a
 guest collection over the owner's volume, and never use broad Docker prune/volume rm.
+
+### Native audio image maintenance
+
+An audio-only update also changes the broker's pinned guest image. Ordinary
+`S up`, `S restart` and single-owner setup are not the multi-account update path.
+Use an explicit maintenance window:
+
+1. Run `S status` and detect `mode: multi-account` (or configured `ACCOUNT_SOCKET`)
+   before kit comparison/upload. Complete the saved-pass checks above, stop HTTP,
+   and inspect every saved account pass with `check-passes.py`. Obtain the relevant
+   owner's decision for checking/confirmed states before any later unlock. Stop the
+   broker, then gracefully stop only verified managed guest containers and the owner
+   desktop for the consistent offline backups below. Retain matching old binaries,
+   kit, image ID/tag and daemon configuration before replacing anything.
+2. Verify each selected guest's container name and `io.anki-review.managed=provisioner-v1`,
+   `io.anki-review.account` and `io.anki-review.reservation` labels against its private
+   reservation. Remove only those stopped, verified guest containers by exact ID,
+   without `-v`. Retain each volume, network, `storage.img`, filesystem metadata,
+   mount/backing identity, keys and `reservation.json`; never call broker DELETE or
+   remove a reservation to force an image change. Keep unselected containers intact.
+3. Transfer the matching kit and both binaries. Build the pinned new image and refresh
+   the owner desktop using the desktop-only `compose up ... --no-deps anki` command
+   above, with the same named owner volume, endpoint, secrets, network, UID/GID and
+   sync settings. Do not restart sync merely for this audio-only update.
+4. Install the new broker with the four saved administrator values as above. Its
+   reconciliation calls `Ensure` for the existing reservations, verifies/remounts
+   their existing storage and recreates the removed guest containers from the new
+   image with the same endpoints and keys. Verify image, labels and storage identity
+   before starting the matching HTTP binary. Preserve every account's vault, pass
+   and preferences. All accounts remain locked; no diagnostic should unlock them.
+
+Do not reset the owner's pass or replace its collection to refresh old rendered HTML.
+Saved HTML remains unchanged until a normal next pass. For rollback, stop HTTP and
+the broker again, stop/remove only the verified replacement guest containers, retain
+their storage/networks/keys/reservations, restore matching old kit/image and binaries,
+and let the old broker's `Ensure` recreate them. Restore the owner desktop with its
+original volume and settings. Never use broad Docker cleanup.
 
 ### Account-aware backups and restore
 

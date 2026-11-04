@@ -22,7 +22,7 @@ import (
 
 const (
 	// Image is the only image the broker can create.
-	Image            = "anki-desktop:26.09.3-ac26.10.14.0"
+	Image            = "anki-desktop:26.09.3-ac26.10.14.0-audio1"
 	managedLabel     = "io.anki-review.managed"
 	accountLabel     = "io.anki-review.account"
 	reservationLabel = "io.anki-review.reservation"

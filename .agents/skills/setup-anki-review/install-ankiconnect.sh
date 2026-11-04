@@ -5,6 +5,7 @@
 #
 # Usage: install-ankiconnect.sh   (ANKI_BASE: Anki's base folder, when it is not the default one)
 set -euo pipefail
+umask 077
 
 die() {
   echo "install-ankiconnect.sh: $*" >&2
@@ -30,10 +31,23 @@ else
 fi
 [ -d "$base" ] || die "no Anki folder at $base: start Anki once, or set ANKI_BASE"
 dest=$base/addons21/2055492159
-[ ! -e "$dest" ] || die "$dest exists already: restart Anki, or check Tools, Add-ons"
+[ ! -e "$dest" ] && [ ! -L "$dest" ] || die "$dest exists already: restart Anki, or check Tools, Add-ons"
+
+# Check before downloading or publishing any add-on state.
+command -v python3 >/dev/null 2>&1 || die "Python 3.11 or newer is required"
+python3 -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1 ||
+  die "Python 3.11 or newer is required"
+for helper in native_audio.py patch_ankiconnect.py; do
+  [ -f "$root/deploy/anki/$helper" ] || die "missing native audio helper: $helper"
+done
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ankiconnect.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
+publish=""
+cleanup() {
+  rm -rf "$tmp"
+  [ -z "$publish" ] || rm -rf "$publish"
+}
+trap cleanup EXIT
 curl -fsSL --retry 3 -m 120 -o "$tmp/ankiconnect.tar.gz" \
   "https://git.sr.ht/~foosoft/anki-connect/archive/$commit.tar.gz"
 if command -v sha256sum >/dev/null 2>&1; then
@@ -47,7 +61,13 @@ mkdir "$tmp/src"
 tar -xzf "$tmp/ankiconnect.tar.gz" -C "$tmp/src" --strip-components=1
 [ -f "$tmp/src/plugin/__init__.py" ] || die "the archive has no plugin/__init__.py"
 
+python3 -I "$root/deploy/anki/patch_ankiconnect.py" "$tmp/src/plugin" ||
+  die "native audio adapter patch failed"
+
 mkdir -p "$base/addons21"
-cp -R "$tmp/src/plugin" "$dest.partial"
-mv "$dest.partial" "$dest"
+# Keep the patched publication on the destination filesystem for an atomic rename.
+publish=$(mktemp -d "$base/addons21/.ankiconnect.XXXXXX")
+cp -R "$tmp/src/plugin" "$publish/plugin"
+[ ! -e "$dest" ] && [ ! -L "$dest" ] || die "$dest exists already: restart Anki, or check Tools, Add-ons"
+mv "$publish/plugin" "$dest"
 echo "installed AnkiConnect ${commit:0:12} (sha256 ok) into $dest: restart Anki to load it"
