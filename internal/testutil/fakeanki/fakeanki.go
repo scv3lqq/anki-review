@@ -3,9 +3,14 @@
 package fakeanki
 
 import (
+	"archive/zip"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -23,6 +28,7 @@ type Card struct {
 	New      bool
 	Reps     int
 	Mod      int64
+	CSS      string
 	answered bool
 }
 
@@ -34,12 +40,14 @@ type Answer struct {
 
 // Anki serves AnkiConnect on a local port.
 type Anki struct {
-	mu       sync.Mutex
-	cards    []*Card
-	answered []Answer
-	syncs    int
-	key      string
-	srv      *httptest.Server
+	mu            sync.Mutex
+	cards         []*Card
+	answered      []Answer
+	syncs         int
+	key           string
+	srv           *httptest.Server
+	media         map[string][]byte
+	importFailure bool
 }
 
 var (
@@ -83,14 +91,42 @@ func (a *Anki) Syncs() int {
 	return a.syncs
 }
 
+// SetMedia installs fixture bytes without accessing a real collection.
+func (a *Anki) SetMedia(name string, raw []byte) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.media == nil {
+		a.media = make(map[string][]byte)
+	}
+	a.media[name] = bytes.Clone(raw)
+}
+
+// FailImport injects native-import failures while retaining staged-file cleanup behavior.
+func (a *Anki) FailImport(fail bool) { a.mu.Lock(); defer a.mu.Unlock(); a.importFailure = fail }
+
+// MediaFiles snapshots fixture filenames for cleanup assertions.
+func (a *Anki) MediaFiles() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	names := make([]string, 0, len(a.media))
+	for name := range a.media {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
 // The apiKey AnkiConnect checks on every request.
 const keyError = "valid api key must be provided"
 
 type params struct {
-	Query   string   `json:"query"`
-	Cards   []int64  `json:"cards"`
-	Decks   []string `json:"decks"`
-	Answers []Answer `json:"answers"`
+	Filename string   `json:"filename"`
+	Data     string   `json:"data"`
+	Path     string   `json:"path"`
+	Query    string   `json:"query"`
+	Cards    []int64  `json:"cards"`
+	Decks    []string `json:"decks"`
+	Answers  []Answer `json:"answers"`
 }
 
 func (a *Anki) serve(w http.ResponseWriter, r *http.Request) {
@@ -121,6 +157,29 @@ func (a *Anki) serve(w http.ResponseWriter, r *http.Request) {
 
 func (a *Anki) handle(action string, p params) (any, string) {
 	switch action {
+	case "storeMediaFile":
+		raw, err := base64.StdEncoding.DecodeString(p.Data)
+		if err != nil {
+			return nil, "bad media data"
+		}
+		if a.media == nil {
+			a.media = make(map[string][]byte)
+		}
+		a.media[p.Filename] = raw
+		return p.Filename, ""
+	case "deleteMediaFile":
+		delete(a.media, p.Filename)
+		return nil, ""
+	case "retrieveMediaFile":
+		raw, ok := a.media[p.Filename]
+		if !ok {
+			return false, ""
+		}
+		return base64.StdEncoding.EncodeToString(raw), ""
+	case "getMediaDirPath":
+		return "/fixture/collection.media", ""
+	case "importPackage":
+		return a.importPackage(p.Path)
 	case "version":
 		return 6, ""
 	case "deckNames":
@@ -221,6 +280,7 @@ func (a *Anki) info(ids []int64) []map[string]any {
 			typ = 0
 		}
 		out = append(out, map[string]any{
+			"css":    c.CSS,
 			"cardId": c.ID, "deckName": c.Deck, "modelName": "Basic", "type": typ, "due": c.ID, "reps": c.Reps, "mod": c.Mod,
 			"question": c.Question, "answer": c.Question + "<hr id=answer>" + c.Answer,
 			"fields":      map[string]any{"Front": map[string]any{"value": c.Question}},
@@ -228,4 +288,50 @@ func (a *Anki) info(ids []int64) []map[string]any {
 		})
 	}
 	return out
+}
+
+func (a *Anki) importPackage(packagePath string) (any, string) {
+	if a.importFailure {
+		return nil, "fixture import unavailable"
+	}
+	raw, ok := a.media[path.Base(packagePath)]
+	if !ok {
+		return false, ""
+	}
+	archive, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return nil, "bad fixture archive"
+	}
+	entries := make(map[string][]byte)
+	for _, file := range archive.File {
+		reader, err := file.Open()
+		if err != nil {
+			return nil, "bad fixture entry"
+		}
+		data, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			return nil, "bad fixture data"
+		}
+		entries[file.Name] = data
+	}
+	var mapping map[string]string
+	if err := json.Unmarshal(entries["media"], &mapping); err != nil {
+		return nil, "bad fixture media"
+	}
+	for number, name := range mapping {
+		a.media[name] = entries[number]
+	}
+	if a.card(99) == nil {
+		a.cards = append(a.cards, &Card{ID: 99, Deck: "Imported", Answer: "Imported answer"})
+	}
+	card := a.card(99)
+	card.Question = `<b>Imported question</b><img src="photo.png">`
+	card.CSS = ".card { color: navy; }"
+	for _, name := range mapping {
+		if name == "voice.wav" {
+			card.Question += `<audio controls src="voice.wav"></audio>`
+		}
+	}
+	return true, ""
 }

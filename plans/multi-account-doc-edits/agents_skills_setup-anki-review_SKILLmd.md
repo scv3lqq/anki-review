@@ -31,5 +31,4 @@ packages, grade or save confirmed grades as a setup diagnostic. The owner and in
 users enter their own explicit grader credentials through the page; do not read them.
 Provision guests as empty, isolated, no-sync runtimes, without AnkiWeb/VNC setup or
 manual AnkiConnect key transfer. Installation does not grant Docker access to HTTP.
-
 ````

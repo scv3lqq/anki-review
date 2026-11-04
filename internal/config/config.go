@@ -4,15 +4,19 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/rs/zerolog"
 )
 
 // Config is everything the server needs; see the README for each variable.
 type Config struct {
+	AccountSocket  string
+	MaxAccounts    int
 	Port           int
 	DataDir        string
 	KnowledgeDecks []string
@@ -41,6 +45,7 @@ func Load(getenv func(string) string) (Config, error) {
 		return def
 	}
 	c := Config{
+		AccountSocket:  get("ACCOUNT_SOCKET", ""),
 		DataDir:        get("DATA_DIR", "data"),
 		AnkiURL:        get("ANKI_CONNECT_URL", "http://127.0.0.1:8765"),
 		ClaudeBin:      get("CLAUDE_BIN", "claude"),
@@ -60,6 +65,12 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	var err error
+	if c.MaxAccounts, err = strconv.Atoi(get("MAX_ACCOUNTS", "4")); err != nil || c.MaxAccounts < 2 || c.MaxAccounts > 8 {
+		return Config{}, fmt.Errorf("config: MAX_ACCOUNTS must be 2 to 8")
+	}
+	if c.AccountSocket != "" && (!filepath.IsAbs(c.AccountSocket) || filepath.Clean(c.AccountSocket) != c.AccountSocket || len(c.AccountSocket) > 100 || strings.IndexFunc(c.AccountSocket, unicode.IsControl) >= 0) {
+		return Config{}, fmt.Errorf("config: ACCOUNT_SOCKET must be a clean absolute Unix socket path")
+	}
 	if c.Port, err = strconv.Atoi(get("PORT", "8767")); err != nil || c.Port < 1 || c.Port > 65535 {
 		return Config{}, fmt.Errorf("config: PORT must be 1 to 65535, got %q", getenv("PORT"))
 	}

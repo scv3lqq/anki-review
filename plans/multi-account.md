@@ -582,3 +582,11 @@ a body, clears stale local review state and reboots on mismatch; never automatic
 resubmits an old mutation. Tests simulate cookie switching in another tab and prove
 no preferences/settings/logout/Anki mutation reaches the wrong current account.
 The header is an expectation guard, never an account-routing input.
+
+T5 upload memory bound: each immutable account handler has one nonblocking import
+lease acquired before reading the raw body. A concurrent upload to that account
+returns409 busy without reading/allocating its body. The lease covers read, validation,
+native import and cleanup, and is independent across accounts. Active-pass check
+precedes expensive ZIP validation; malformed packages still get409 while a pass is
+active, and saved pass is untouched. Regression blocks one Import and proves the
+second body is not read, while another account can import independently.

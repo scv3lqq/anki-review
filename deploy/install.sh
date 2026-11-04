@@ -19,6 +19,27 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/provider.sh"
 
 fail() { echo "install.sh: $*" >&2; exit 1; }
+# This installer restarts HTTP and cannot assess private multi-account passes.
+refuse_multi_account_install() {
+  [[ -z ${ACCOUNT_SOCKET:-} ]] || fail "multi-account mode requires explicit maintenance; ordinary installation is refused"
+  local saved_env=/etc/anki-review/env line name value
+  [[ -e $saved_env || -L $saved_env ]] || return 0
+  [[ -f $saved_env && ! -L $saved_env && -r $saved_env ]] || fail "cannot establish saved account mode; ordinary installation is refused"
+  while IFS= read -r line || [[ -n $line ]]; do
+    name=${line%%=*}
+    name=${name#"${name%%[![:space:]]*}"}
+    name=${name%"${name##*[![:space:]]}"}
+    [[ $name == ACCOUNT_SOCKET && $line == *=* ]] || continue
+    value=${line#*=}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    case $value in
+      '' | '""' | "''") ;;
+      *) fail "multi-account mode requires explicit maintenance; ordinary installation is refused" ;;
+    esac
+  done <"$saved_env"
+}
+refuse_multi_account_install
 [[ $EUID -eq 0 ]] || fail "run as root: sudo $0"
 umask 022
 
