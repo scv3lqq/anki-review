@@ -277,3 +277,46 @@ func TestRenderedQuestionDoesNotExposeHiddenAnswerAttributes(t *testing.T) {
 		t.Fatal("saved public question HTML contains hidden answers or active content")
 	}
 }
+
+func TestCardsInfoNativeAudioKeepsRenderedSidesPassiveAndSeparate(t *testing.T) {
+	const front = `<b>Question</b><audio controls preload="none" src="question%20voice.mp3" onplay="frontSecret()"></audio>`
+	const back = `<hr id="answer"><audio controls preload="none" src="answer.mp3" autoplay onplay="backSecret()"></audio>`
+	c, _ := newFake(t, func(action string, _ json.RawMessage) (any, string) {
+		switch action {
+		case "findCards":
+			return []int64{1}, ""
+		case "getDeckStats":
+			return map[string]any{}, ""
+		case "cardsInfo":
+			return []map[string]any{{
+				"cardId": 1, "deckName": "English", "question": front,
+				"answer": front + back + `<script>answerSecret()</script><audio src="https://example.invalid/leak.mp3"></audio>`,
+			}}, ""
+		default:
+			return nil, "unexpected action"
+		}
+	})
+	items, err := c.DueCards(context.Background(), "English", 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("DueCards = %v, %v", items, err)
+	}
+	item := items[0]
+	for side, rendered := range map[string]string{"question": item.QuestionHTML, "back": item.BackHTML} {
+		for _, want := range []string{`<audio`, `controls=""`, `preload="none"`, `src="/api/media/question%20voice.mp3"`} {
+			if !strings.Contains(rendered, want) {
+				t.Errorf("%s HTML missing native audio markup %q", side, want)
+			}
+		}
+		for _, forbidden := range []string{"onplay", "autoplay", "frontSecret", "backSecret", "answerSecret", "<script", "example.invalid", "leak.mp3"} {
+			if strings.Contains(rendered, forbidden) {
+				t.Errorf("%s HTML contains active or external content %q", side, forbidden)
+			}
+		}
+	}
+	if strings.Contains(item.QuestionHTML, "answer.mp3") {
+		t.Fatal("question HTML exposes back audio")
+	}
+	if !strings.Contains(item.BackHTML, `src="/api/media/answer.mp3"`) {
+		t.Fatal("back HTML lost its authenticated audio")
+	}
+}

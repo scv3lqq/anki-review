@@ -52,8 +52,9 @@ COPY --from=fetch /opt/anki /opt/anki
 COPY --from=fetch /opt/ankiconnect /opt/ankiconnect
 # --chmod also sets the mode of the directory COPY creates: 0644 would leave it without the x bit
 # and the anki user could not open the entrypoint.
-COPY --chmod=0755 entrypoint.sh setup-profile.py syncserver.sh /usr/local/lib/anki/
-RUN /opt/anki/python/bin/python3 -I -c 'import pickle, sqlite3' \
+COPY --chmod=0755 entrypoint.sh setup-profile.py syncserver.sh native_audio.py patch_ankiconnect.py /usr/local/lib/anki/
+RUN /opt/anki/python/bin/python3 -I /usr/local/lib/anki/patch_ankiconnect.py /opt/ankiconnect \
+  && /opt/anki/python/bin/python3 -I -c 'import pickle, sqlite3' \
   && setpriv --reuid=anki --regid=anki --clear-groups \
     test -r /usr/local/lib/anki/entrypoint.sh -a -r /usr/local/lib/anki/setup-profile.py \
     -a -r /usr/local/lib/anki/syncserver.sh
