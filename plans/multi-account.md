@@ -564,3 +564,21 @@ field anki_key, map it to503 with "Your collection is temporarily unavailable. T
 again." and no infrastructure field/endpoint/key/config names. Runtime/provisioning
 errors return generic account-unavailable messages; only opaque account IDs appear
 in operation logs. Owner legacy setup/settings keep existing key form compatibility.
+
+T2 durable rebind correction: only update the in-memory reservation map after
+writePrivateJSON(RebindRequired=true) succeeds. A failed durable write must be
+retried before any mount/start; write-failure, retry, interrupted repair and daemon
+restart must retain the rebind requirement and perform stop/rm/create before start.
+Regression uses an injected reservation-write failure and stop failure.
+
+T5/T6 cross-tab account expectation: authenticated browser API requests send optional
+X-Anki-Account containing the expected opaque account ID. Authentication still selects
+only by cookie. After authentication, h.authed compares this expectation to immutable
+Options.AccountID and refuses mismatch with409/code account_changed before invoking
+the operation (including logout/settings/preferences). Successful authenticated
+responses include X-Anki-Account identity. Session endpoint checks it when present;
+login/setup/register/bootstrap omit it. UI checks response identity before consuming
+a body, clears stale local review state and reboots on mismatch; never automatically
+resubmits an old mutation. Tests simulate cookie switching in another tab and prove
+no preferences/settings/logout/Anki mutation reaches the wrong current account.
+The header is an expectation guard, never an account-routing input.

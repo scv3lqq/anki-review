@@ -550,3 +550,68 @@ func TestRuntimeMutationWaitHonorsDeadline(t *testing.T) {
 		t.Fatalf("bounded mutex wait: %v", err)
 	}
 }
+
+func TestRebindFlagIsDurableBeforeMountAfterWriteFailure(t *testing.T) {
+	service, docker, storage, config := newFixture(t, 1)
+	storage.beforeEnsure = func() error { storage.mounted = true; return nil }
+	if _, err := service.Ensure(context.Background(), accountA); err != nil {
+		t.Fatal(err)
+	}
+	storage.mounted = false
+	directory := filepath.Join(config.Root, accountA)
+	manifest := filepath.Join(directory, "reservation.json")
+	backup := filepath.Join(directory, "reservation.backup")
+	if err := os.Rename(manifest, backup); err != nil {
+		t.Fatal(err)
+	}
+	// The directory blocker also forces the write to fail when tests run as root.
+	if err := os.Mkdir(manifest, 0500); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(directory, 0700) })
+	_, writeErr := service.Ensure(context.Background(), accountA)
+	if err := os.Chmod(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if writeErr == nil {
+		t.Fatal("could not inject persistence failure")
+	}
+	var disk reservation
+	if err := readPrivateJSON(manifest, &disk); err != nil {
+		t.Fatal(err)
+	}
+	if disk.RebindRequired {
+		t.Fatal("write failure unexpectedly persisted repair flag")
+	}
+	docker.failStop = true
+	if _, err := service.Ensure(context.Background(), accountA); err == nil {
+		t.Fatal("expected interrupted repair after mount")
+	}
+	if !storage.mounted {
+		t.Fatal("probe did not reach mount")
+	}
+	service, err := New(config, docker, storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.ready = func(context.Context, Endpoint) error { return nil }
+	docker.calls = nil
+	if err := service.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range docker.calls {
+		if call[0] == "container" && call[1] == "create" {
+			return
+		}
+	}
+	t.Fatal("lost durable rebind after write failure and restart: stale bind was started")
+}

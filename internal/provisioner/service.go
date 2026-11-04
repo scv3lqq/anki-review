@@ -208,10 +208,10 @@ func (s *Service) ensure(ctx context.Context, id string, reservedOnly bool) (End
 	}
 	if !wasMounted && !record.RebindRequired {
 		record.RebindRequired = true
-		s.reservations[id] = record
 		if err := writePrivateJSON(filepath.Join(s.directory(record), "reservation.json"), record); err != nil {
 			return Endpoint{}, err
 		}
+		s.reservations[id] = record
 	}
 	if err := s.storage.Ensure(ctx, s.directory(record), s.config.StorageBytes, s.config.UID, s.config.GID); err != nil {
 		return Endpoint{}, fmt.Errorf("ensure bounded storage: %w", err)
