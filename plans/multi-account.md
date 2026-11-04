@@ -590,3 +590,32 @@ native import and cleanup, and is independent across accounts. Active-pass check
 precedes expensive ZIP validation; malformed packages still get409 while a pass is
 active, and saved pass is untouched. Regression blocks one Import and proves the
 second body is not read, while another account can import independently.
+
+## T8 Linux native import filename normalization
+
+Actual pinned Linux Anki normalizes stored media filenames to lowercase. A native
+exported package imports successfully through AnkiConnect, but the application
+rejects `storeMediaFile` because the random staging basename contains uppercase.
+Keep the native import adapter and strict filename equality check; generate its
+random basename in lowercase before the upload. Lowercasing the base32 random text
+preserves its entropy and avoids trusting a server-provided alternate path.
+
+Exclusive scope: `internal/repository/ankiconnect/collection.go` and
+`internal/repository/ankiconnect/collection_test.go`. Preserve archive validation,
+exact expected-name equality, native importer behavior, cleanup on every outcome,
+size limits and existing review/account logic.
+
+Implementation sequence: write a regression before changing behavior. Its fake
+AnkiConnect `storeMediaFile` must return the lowercase-normalized requested name,
+like the pinned Linux Anki. Require successful import, exact native path based on
+the requested basename, and cleanup of that exact file. Save the failing RED log
+before changing `name` to concatenate `strings.ToLower(rand.Text())`; do not remove
+or widen the equality check to accept arbitrary returned paths. Preserve the
+existing negative contract for an unexpected stored filename and cleanup failure.
+
+Scoped gates: `go test -race ./internal/repository/ankiconnect` and
+`golangci-lint run ./internal/repository/ankiconnect/...`. Independent review binds
+to exact hashes. Full gates before commit: `make check`, `make build`,
+`make build-linux`, `git diff --check`. Acceptance requires rerunning the real
+Linux synthetic-account native package import/media/concurrent grading and
+restart/resume workload with the rebuilt binaries; fixtures alone are insufficient.

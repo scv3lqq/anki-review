@@ -84,6 +84,77 @@ func TestImportPackageNativeStagingAndCleanup(t *testing.T) {
 	}
 }
 
+func TestImportPackageWithLowercaseNormalizedStagingName(t *testing.T) {
+	var staged string
+	var actions []string
+	c, _ := newFake(t, func(action string, params json.RawMessage) (any, string) {
+		actions = append(actions, action)
+		var p map[string]string
+		if params != nil {
+			if err := json.Unmarshal(params, &p); err != nil {
+				t.Fatal(err)
+			}
+		}
+		switch action {
+		case "storeMediaFile":
+			staged = p["filename"]
+			return strings.ToLower(staged), ""
+		case "getMediaDirPath":
+			return "/collection/media", ""
+		case "importPackage":
+			if p["path"] != "/collection/media/"+staged {
+				t.Errorf("native import path = %q, want requested basename %q", p["path"], staged)
+			}
+			return true, ""
+		case "deleteMediaFile":
+			if p["filename"] != staged {
+				t.Errorf("cleanup filename = %q, want requested basename %q", p["filename"], staged)
+			}
+			return nil, ""
+		default:
+			t.Errorf("unexpected action %q", action)
+			return nil, "unexpected action"
+		}
+	})
+	if err := c.ImportPackage(context.Background(), packageFixture(t)); err != nil {
+		t.Fatalf("import with normalized staging name: %v", err)
+	}
+	if got := strings.Join(actions, ","); got != "storeMediaFile,getMediaDirPath,importPackage,deleteMediaFile" {
+		t.Fatalf("import actions = %q", got)
+	}
+}
+
+func TestImportPackageRejectsUnexpectedStoredFilename(t *testing.T) {
+	var staged string
+	var actions []string
+	c, _ := newFake(t, func(action string, params json.RawMessage) (any, string) {
+		actions = append(actions, action)
+		var p map[string]string
+		if err := json.Unmarshal(params, &p); err != nil {
+			t.Fatal(err)
+		}
+		switch action {
+		case "storeMediaFile":
+			staged = p["filename"]
+			return "unexpected.apkg", ""
+		case "deleteMediaFile":
+			if p["filename"] != staged {
+				t.Errorf("cleanup filename = %q, want requested basename %q", p["filename"], staged)
+			}
+			return nil, ""
+		default:
+			t.Errorf("unexpected action %q", action)
+			return nil, "unexpected action"
+		}
+	})
+	if err := c.ImportPackage(context.Background(), packageFixture(t)); err == nil || !strings.Contains(err.Error(), "unexpected media filename") {
+		t.Fatalf("unexpected staging name error = %v", err)
+	}
+	if got := strings.Join(actions, ","); got != "storeMediaFile,deleteMediaFile" {
+		t.Fatalf("rejected import actions = %q", got)
+	}
+}
+
 func TestImportCleanupSurvivesCanceledRequestAndRejectsInvalidPackage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

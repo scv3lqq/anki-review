@@ -27,7 +27,7 @@ func (c *Client) ImportPackage(ctx context.Context, raw []byte) (err error) {
 	if err := apkg.Validate(raw); err != nil {
 		return fmt.Errorf("validate package: %w", err)
 	}
-	name := "_anki-review-import-" + rand.Text() + ".apkg"
+	name := "_anki-review-import-" + strings.ToLower(rand.Text()) + ".apkg"
 	// Even a canceled or failed upload may have created its file before the response was lost.
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
