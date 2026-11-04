@@ -101,10 +101,89 @@ inspect the encrypted saved provider. It submits no cards and reads no authentic
 
 Codex grading requires codex-cli **0.166.0** and a dedicated ChatGPT device session.
 Do not reuse the session of another CLI or service: refresh rotates its credentials.
-Enable device code authentication in your ChatGPT security settings first. During login,
-open the displayed URL in your browser, enter the displayed user code, and approve access.
-The owner performs these steps in a private terminal; never paste codes or credentials into chat.
+### Get the file on your own computer (recommended)
+
+For Codex, upload the whole `auth.json` file; do not extract or paste a token.
+A plain `codex login --device-auth` can use the OS credential store, so a file
+may not appear. The steps below force a separate file-based login for this service.
+Use your own ChatGPT account and keep this terminal open until settings are saved.
+They work even when anki-review itself runs on a remote server; no SSH is needed.
+
+1. Install Codex CLI 0.166.0 if needed, then check `codex --version` in Terminal
+   (macOS/Linux) or PowerShell (Windows). See the
+   [official Codex guide](https://developers.openai.com/codex/quickstart).
+2. Enable device code authentication in your ChatGPT security settings. Copy and
+   run only the block for your computer. These create a private temporary folder
+   before login; they do not reuse your usual Codex session.
+
+macOS, Terminal:
+
+```sh
+umask 077
+anki_codex_dir=$(mktemp -d "${TMPDIR:-/tmp}/anki-review-codex.XXXXXX") &&
+CODEX_HOME="$anki_codex_dir" codex -c 'cli_auth_credentials_store="file"' login --device-auth &&
+test -s "$anki_codex_dir/auth.json" &&
+printf 'File to upload: %s/auth.json\n' "$anki_codex_dir" &&
+open -R "$anki_codex_dir/auth.json"
+```
+
+Linux, Terminal (uses memory-backed `/dev/shm`):
+
+```sh
+umask 077
+anki_codex_dir=$(mktemp -d /dev/shm/anki-review-codex.XXXXXX) &&
+CODEX_HOME="$anki_codex_dir" codex -c 'cli_auth_credentials_store="file"' login --device-auth &&
+test -s "$anki_codex_dir/auth.json" &&
+printf 'File to upload: %s/auth.json\n' "$anki_codex_dir"
+```
+
+Windows, PowerShell:
+
+```powershell
+$ankiCodexDir = Join-Path $env:LOCALAPPDATA ("anki-review-codex-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $ankiCodexDir -ErrorAction Stop | Out-Null
+icacls $ankiCodexDir /inheritance:r /grant:r "$([Security.Principal.WindowsIdentity]::GetCurrent().Name):(OI)(CI)F"
+if ($LASTEXITCODE -ne 0) { throw "Could not protect the temporary folder." }
+$ankiPreviousCodexHome = $env:CODEX_HOME
+$env:CODEX_HOME = $ankiCodexDir
+try { codex -c 'cli_auth_credentials_store="file"' login --device-auth } finally { $env:CODEX_HOME = $ankiPreviousCodexHome }
+if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath (Join-Path $ankiCodexDir "auth.json"))) { throw "Login did not create auth.json. Complete browser approval and try again." }
+Write-Output ("File to upload: " + (Join-Path $ankiCodexDir "auth.json"))
+```
+
+3. While the command waits, open the URL shown in the terminal, sign in to your
+   own ChatGPT account, enter the displayed one-time code and approve access.
+   Wait until the terminal reports successful login. Never share the code or file.
+4. The terminal prints **File to upload** with the exact `auth.json` path. On macOS,
+   Finder also selects it. On the anki-review page select **Codex**, choose this
+   complete file using the file picker, then submit registration/setup or press
+   **Save** in Settings (enter your current password when requested).
+   To enter the printed path in a file picker: macOS **Cmd+Shift+G**, Linux
+   **Ctrl+L**, Windows the **File name** box. Do not open the file or paste its contents.
+5. Wait for a successful registration/save on the page. Only then, in the same
+   terminal, delete the temporary folder. Keep it for retry if the page reports an error.
+
+macOS/Linux cleanup, only after successful save:
+
+```sh
+rm -rf -- "$anki_codex_dir"
+```
+
+Windows cleanup, only after successful save:
+
+```powershell
+Remove-Item -LiteralPath $ankiCodexDir -Recurse -Force
+```
+
+If no file appears, check that browser approval completed, use the entire command
+block including `CODEX_HOME` and `cli_auth_credentials_store="file"`, and look at
+**File to upload**, not the current folder or your usual `.codex` directory.
+Do not run `codex logout` on your normal session. Imported credentials refresh
+inside the service; do not continue using this temporary session elsewhere.
+If the saved session is rejected later, repeat this dedicated login and import a new file.
 See [Codex authentication](https://developers.openai.com/codex/auth).
+
+### Advanced: create the file directly on the VPS
 
 For a headless VPS, connect with `ssh -t -p <port> <user>@<server> bash` and run there:
 
@@ -141,11 +220,9 @@ Only after successful save, remove the local staging directory in its original t
 created above: `rm -rf -- "$transfer_dir"` and `sudo -u anki-review rm -rf -- "$login_dir"`.
 Close only the SSH tunnel created for this import. If save fails, retry before removing staging.
 
-For a local install, use the same temporary `CODEX_HOME` and explicit file-store option with
-`codex -c 'cli_auth_credentials_store="file"' login --device-auth`, then select its `auth.json`
-on the local setup page and remove that temporary home after successful save. On Linux use a
-private directory under `/dev/shm`. On macOS temporary auth files reside on local disk until
-removed; rely on the local account permissions and disk encryption for this boundary.
+For a local service, use the same personal-computer steps above. Temporary files on
+macOS and Windows reside on local disk until deleted; use a private local account
+and disk encryption. Linux login uses a private memory-backed folder under `/dev/shm`.
 
 The CLI refreshes the imported session during checks and grading. The service reseals every
 changed snapshot before accepting results, including refresh after a failed call. A revoked or
