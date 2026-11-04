@@ -262,6 +262,13 @@ kbd { margin-right: 5px; padding: 1px 5px; border: 1px solid var(--line); border
 .help summary:hover { color: var(--text); }
 .help ul { margin: 10px 0 0; padding-left: 18px; font-size: 14px; color: var(--muted); text-wrap: pretty; }
 .help li + li { margin-top: 8px; }
+.codex-help { min-width: 0; }
+.codex-help p, .codex-help ol { margin: 12px 0 0; font-size: 14px; line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; }
+.codex-help ol { padding-left: 20px; }
+.codex-help li + li { margin-top: 16px; }
+.codex-help details { margin-top: 12px; min-width: 0; }
+.codex-help pre { max-width: 100%; margin: 10px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--faint); font: 400 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.codex-help pre code { padding: 0; background: none; font-size: inherit; white-space: inherit; }
 .auth-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .auth-actions .btn { flex: 1 1 auto; }
 .status { flex: 1 1 100%; margin: 0; font: 400 14px/1.45 var(--sans); color: var(--muted); }

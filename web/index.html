@@ -294,9 +294,61 @@
 </template>
 
 <template id="tpl-codex">
-  <details class="help">
-    <summary>How to import a ChatGPT session</summary>
-    <p class="note">Use a dedicated Codex login for this service. Follow the setup guide to run <code>codex login --device-auth</code> with a temporary <code>CODEX_HOME</code> and file credential storage, then choose its complete <code>auth.json</code> here. Delete the temporary copy after importing. Codex refreshes the saved session automatically. If authentication fails, repeat the login and import a new file.</p>
+  <details class="help codex-help">
+    <summary>How to connect your ChatGPT account</summary>
+    <p>For Codex, upload the whole <code>auth.json</code> file; do not extract or paste a token. A plain <code>codex login --device-auth</code> can use the OS credential store, so a file may not appear. These steps force a separate file-based login for this service.</p>
+    <p>Use your own ChatGPT account and keep this terminal open until settings are saved. These steps also work when anki-review runs on a remote server; no SSH is needed.</p>
+    <ol>
+      <li>Install Codex CLI 0.166.0 if needed, then check <code>codex --version</code> in Terminal (macOS/Linux) or PowerShell (Windows). See the <a href="https://developers.openai.com/codex/quickstart" target="_blank" rel="noopener noreferrer">official Codex guide</a>.</li>
+      <li>Enable device code authentication in your ChatGPT security settings. Copy and run the entire block for your computer. These create a private temporary folder before login; they do not reuse your usual Codex session.
+        <details>
+          <summary>macOS: Terminal</summary>
+          <pre><code>umask 077
+anki_codex_dir=$(mktemp -d "${TMPDIR:-/tmp}/anki-review-codex.XXXXXX") &amp;&amp;
+CODEX_HOME="$anki_codex_dir" codex -c 'cli_auth_credentials_store="file"' login --device-auth &amp;&amp;
+test -s "$anki_codex_dir/auth.json" &amp;&amp;
+printf 'File to upload: %s/auth.json\n' "$anki_codex_dir" &amp;&amp;
+open -R "$anki_codex_dir/auth.json"</code></pre>
+        </details>
+        <details>
+          <summary>Linux: Terminal</summary>
+          <p>Uses a private memory-backed folder under <code>/dev/shm</code>.</p>
+          <pre><code>umask 077
+anki_codex_dir=$(mktemp -d /dev/shm/anki-review-codex.XXXXXX) &amp;&amp;
+CODEX_HOME="$anki_codex_dir" codex -c 'cli_auth_credentials_store="file"' login --device-auth &amp;&amp;
+test -s "$anki_codex_dir/auth.json" &amp;&amp;
+printf 'File to upload: %s/auth.json\n' "$anki_codex_dir"</code></pre>
+        </details>
+        <details>
+          <summary>Windows: PowerShell</summary>
+          <pre><code>$ankiCodexDir = Join-Path $env:LOCALAPPDATA ("anki-review-codex-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $ankiCodexDir -ErrorAction Stop | Out-Null
+icacls $ankiCodexDir /inheritance:r /grant:r "$([Security.Principal.WindowsIdentity]::GetCurrent().Name):(OI)(CI)F"
+if ($LASTEXITCODE -ne 0) { throw "Could not protect the temporary folder." }
+$ankiPreviousCodexHome = $env:CODEX_HOME
+$env:CODEX_HOME = $ankiCodexDir
+try { codex -c 'cli_auth_credentials_store="file"' login --device-auth } finally { $env:CODEX_HOME = $ankiPreviousCodexHome }
+if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath (Join-Path $ankiCodexDir "auth.json"))) { throw "Login did not create auth.json. Complete browser approval and try again." }
+Write-Output ("File to upload: " + (Join-Path $ankiCodexDir "auth.json"))</code></pre>
+        </details>
+      </li>
+      <li>While the command waits, open the URL shown in the terminal, sign in to your own ChatGPT account, enter the displayed one-time code and approve access. Wait until the terminal reports successful login. Never share the code or file.</li>
+      <li>The terminal prints <strong>File to upload</strong> with the exact <code>auth.json</code> path. On macOS, Finder also selects it. On this page select <strong>Codex</strong>, choose this complete file using the file picker, then submit registration/setup or press <strong>Save</strong> in Settings (enter your current password when requested).
+        <p>To enter the printed path in a file picker: macOS <strong>Cmd+Shift+G</strong>, Linux <strong>Ctrl+L</strong>, Windows the <strong>File name</strong> box. Do not open the file or paste its contents.</p>
+      </li>
+      <li>Wait for a successful registration/save on the page. Only then, in the same terminal, delete the temporary folder. Keep it for retry if the page reports an error.
+        <details>
+          <summary>macOS/Linux cleanup: only after successful save</summary>
+          <pre><code>rm -rf -- "$anki_codex_dir"</code></pre>
+        </details>
+        <details>
+          <summary>Windows cleanup: only after successful save</summary>
+          <pre><code>Remove-Item -LiteralPath $ankiCodexDir -Recurse -Force</code></pre>
+        </details>
+      </li>
+    </ol>
+    <p>If no file appears, check that browser approval completed, use the entire command block including <code>CODEX_HOME</code> and <code>cli_auth_credentials_store="file"</code>, and look at <strong>File to upload</strong>, not the current folder or your usual <code>.codex</code> directory.</p>
+    <p>Do not run <code>codex logout</code> on your normal session. Imported credentials refresh inside the service; do not continue using this temporary session elsewhere. If the saved session is rejected later, repeat this dedicated login and import a new file. See <a href="https://developers.openai.com/codex/auth" target="_blank" rel="noopener noreferrer">Codex authentication</a>.</p>
   </details>
 </template>
 
