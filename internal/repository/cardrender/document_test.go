@@ -1,9 +1,130 @@
 package cardrender
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 )
+
+func TestDocumentDarkTheme(t *testing.T) {
+	const trustedTheme = `:root { color-scheme: dark !important; background: transparent !important; } body.card { background: transparent !important; color: oklch(0.96 0.005 140) !important; }`
+	tests := []struct {
+		name     string
+		raw      string
+		preserve []string
+		oversize bool
+	}{
+		{
+			name:     "plain HTML",
+			raw:      `<p>safe content</p>`,
+			preserve: []string{`<p>safe content</p>`},
+		},
+		{
+			name:     "standard light card CSS",
+			raw:      `<style>.card { color: black; background-color: white; }</style><div class="card">safe content</div>`,
+			preserve: []string{`.card { color: black; background-color: white; }`, `<div class="card">safe content</div>`},
+		},
+		{
+			name:     "important light card CSS",
+			raw:      `<style>.card { color: black !important; background: white !important; }</style><p>safe content</p>`,
+			preserve: []string{`.card { color: black !important; background: white !important; }`, `<p>safe content</p>`},
+		},
+		{
+			name:     "legacy full document",
+			raw:      `<!doctype html><html><head><style>body.card { background: white !important; color: black !important; }</style></head><body class="card"><p>saved content</p></body></html>`,
+			preserve: []string{`body.card { background: white !important; color: black !important; }`, `<p>saved content</p>`},
+		},
+		{
+			name:     "oversize fallback",
+			raw:      strings.Repeat("x", maxDocumentBytes+1),
+			oversize: true,
+		},
+		{
+			name: "nested formatting media and night CSS",
+			raw:  `<style>@font-face {font-family:test;src:url('_font.woff2')} .nightMode .card { color: cyan; } .night_mode .card { background: navy; }</style><div class="card" style="font-family:test;text-align:center"><span style="color: #ff8800">colored content</span><code>x</code><img src="photo.png" alt="example"><audio controls src="audio.ogg"></audio></div>`,
+			preserve: []string{
+				`font-family:test`, `/api/media/_font.woff2`,
+				`.nightMode .card { color: cyan; }`, `.night_mode .card { background: navy; }`,
+				`text-align:center`, `<span style="color: #ff8800">colored content</span>`, `<code>x</code>`,
+				`src="/api/media/photo.png"`, `src="/api/media/audio.ogg"`, `<audio`, `controls`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := tt.raw
+			passes := 2
+			if tt.oversize {
+				passes = 1
+			}
+			for pass := 1; pass <= passes; pass++ {
+				got := Document(raw)
+				t.Run(fmt.Sprintf("pass_%d", pass), func(t *testing.T) {
+					doc, err := html.Parse(strings.NewReader(got))
+					if err != nil {
+						t.Fatalf("parse rendered document: %v", err)
+					}
+					root := documentTestElement(t, doc, "html")
+					body := documentTestElement(t, doc, "body")
+					assertDocumentClassTokens(t, root, "nightMode", "night_mode")
+					assertDocumentClassTokens(t, body, "card", "nightMode", "night_mode")
+					style := body.LastChild
+					if style == nil || style.Type != html.ElementNode || style.Data != "style" {
+						t.Error("final body child must be the trusted theme style")
+					} else if style.FirstChild == nil || style.FirstChild.Type != html.TextNode || style.FirstChild.Data != trustedTheme || style.FirstChild.NextSibling != nil {
+						t.Error("final body style must contain the exact trusted theme declarations")
+					}
+					for _, want := range tt.preserve {
+						if !strings.Contains(got, want) {
+							t.Errorf("safe content missing: %q", want)
+						}
+					}
+				})
+				raw = got
+			}
+		})
+	}
+}
+
+func documentTestElement(t *testing.T, root *html.Node, name string) *html.Node {
+	t.Helper()
+	var find func(*html.Node) *html.Node
+	find = func(node *html.Node) *html.Node {
+		if node.Type == html.ElementNode && node.Data == name {
+			return node
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			if found := find(child); found != nil {
+				return found
+			}
+		}
+		return nil
+	}
+	if found := find(root); found != nil {
+		return found
+	}
+	t.Fatalf("rendered document missing %s element", name)
+	return nil
+}
+
+func assertDocumentClassTokens(t *testing.T, node *html.Node, want ...string) {
+	t.Helper()
+	classes := make(map[string]bool)
+	for _, attr := range node.Attr {
+		if attr.Key == "class" {
+			for _, token := range strings.Fields(attr.Val) {
+				classes[token] = true
+			}
+		}
+	}
+	for _, token := range want {
+		if !classes[token] {
+			t.Errorf("%s missing class token %q", node.Data, token)
+		}
+	}
+}
 
 func TestDocumentPreservesFormattingCSSAndLocalMedia(t *testing.T) {
 	raw := `<style>.card { color: red; font-family: test } @font-face {font-family:test;src:url('_font.woff2')} p {background-image:url("photo one.png")}</style><div class="card"><b>bold</b><code>x</code><img src="photo%20one.png" alt="example">[sound:voice.mp3]<audio controls src="audio.ogg"></audio></div>`

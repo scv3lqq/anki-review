@@ -20,8 +20,9 @@ func MediaName(name string) bool {
 
 // Document parses and reconstructs a standalone document; raw card HTML never enters the parent DOM.
 func Document(raw string) string {
-	const start = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; connect-src 'none'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'"></head><body class="card">`
-	const end = `</body></html>`
+	const start = `<!doctype html><html class="nightMode night_mode"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; connect-src 'none'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'"></head><body class="card nightMode night_mode">`
+	// The isolated frame needs its own theme, appended to override native white card canvases.
+	const end = `<style>:root { color-scheme: dark !important; background: transparent !important; } body.card { background: transparent !important; color: oklch(0.96 0.005 140) !important; }</style></body></html>`
 	if len(raw) > maxDocumentBytes {
 		return start + end
 	}

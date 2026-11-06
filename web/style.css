@@ -302,7 +302,7 @@ kbd { margin-right: 5px; padding: 1px 5px; border: 1px solid var(--line); border
 .collection-tools .field, .collection-tools .btn, .collection-tools .note { margin-top: 14px; }
 .account-tools .btn, #invite-link-field { margin-top: 14px; }
 .field textarea { width: 100%; min-height: 100px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); font: 400 14px/1.5 var(--mono); resize: vertical; }
-.card-frame { display: block; width: 100%; min-height: 180px; height: 260px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.card-frame { display: block; width: 100%; min-height: 180px; height: 260px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 .row .card-frame { height: 200px; }
 .kv .card-frame { min-height: 140px; height: 220px; }
 .res.skipped .card-frame { margin: 0 0 14px 40px; width: calc(100% - 40px); }
