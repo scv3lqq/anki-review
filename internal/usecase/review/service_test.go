@@ -393,6 +393,65 @@ func TestMore(t *testing.T) {
 	}
 }
 
+func TestMoreAfterCachedZero(t *testing.T) {
+	e := newEnv(t, nil)
+	session := e.graded(t)
+	if err := e.svc.Confirm(session, nil); err != nil {
+		t.Fatal(err)
+	}
+	e.settle()
+	if st := e.svc.Status(); !st.Written || st.More != 0 {
+		t.Fatalf("initial Status() = %+v, want written with cached More=0", st)
+	}
+
+	newlyDue := []domain.Item{
+		{CardID: 40, Deck: "Tech", Question: "newly due one"},
+		{CardID: 50, Deck: "Tech", Question: "newly due two"},
+		{CardID: 60, Deck: "Tech", Question: "newly due three"},
+	}
+	e.anki.mu.Lock()
+	e.anki.due["Tech"] = newlyDue
+	e.anki.mu.Unlock()
+	if err := e.svc.More(context.Background(), session, 2); err != nil {
+		t.Fatalf("More() after cards become due: %v", err)
+	}
+	cards := e.svc.Cards()
+	if cards.Session == session || cards.Stage != domain.StageInput || cards.Due != 2 || len(cards.Cards) != 2 {
+		t.Fatalf("Cards() after newly due More = %+v, want a new two-card input session", cards)
+	}
+	if cards.Cards[0].Question != "newly due one" || cards.Cards[1].Question != "newly due two" {
+		t.Fatalf("new batch cards = %+v, want current due queue", cards.Cards)
+	}
+}
+
+func TestMoreCachedZeroWhenNothingLeft(t *testing.T) {
+	e := newEnv(t, nil)
+	session := e.graded(t)
+	if err := e.svc.Confirm(session, nil); err != nil {
+		t.Fatal(err)
+	}
+	e.settle()
+	e.anki.mu.Lock()
+	e.anki.due["Tech"] = nil
+	e.anki.mu.Unlock()
+
+	wantConflict(t, e.svc.More(context.Background(), session, 2), CodeEmpty)
+	cards := e.svc.Cards()
+	if cards.Session != session || cards.Stage != domain.StageWritten {
+		t.Fatalf("empty More replaced the written session: %+v", cards)
+	}
+}
+
+func TestMoreBeforeConfirmation(t *testing.T) {
+	e := newEnv(t, nil)
+	session := e.graded(t)
+	before := e.svc.Cards()
+	wantConflict(t, e.svc.More(context.Background(), session, 2), CodeEmpty)
+	if after := e.svc.Cards(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("More replaced an unconfirmed batch: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestMoreWhenNothingLeft(t *testing.T) {
 	e := newEnv(t, nil)
 	session := e.graded(t)

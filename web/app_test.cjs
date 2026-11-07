@@ -105,19 +105,66 @@ class Element {
   set innerHTML(_value) { throw new Error("parent innerHTML is forbidden"); }
 }
 
+const flushPage = () => new Promise((resolve) => setImmediate(resolve));
+
 function pageHarness(fetch, hash = "") {
   const nodes = new Map();
   for (const match of fs.readFileSync(`${__dirname}/index.html`, "utf8").matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"/g)) nodes.set(match[2], new Element(match[1]));
   const get = (id) => { assert.ok(nodes.has(id), `missing page element ${id}`); return nodes.get(id); };
-  const location = { href: `https://review.example/${hash}`, hash, reload() {} };
+  let reloads = 0;
+  const location = { href: `https://review.example/${hash}`, hash, reload() { reloads++; } };
+  const storage = new Map();
+  const events = () => {
+    const listeners = new Map();
+    return {
+      addEventListener(type, listener) {
+        if (!listeners.has(type)) listeners.set(type, []);
+        listeners.get(type).push(listener);
+      },
+      dispatch(type) { for (const listener of listeners.get(type) ?? []) listener({ type }); },
+      listenerCount(type) { return (listeners.get(type) ?? []).length; },
+    };
+  };
+  const window = events();
+  const document = { ...events(), hidden: false, getElementById: get, querySelectorAll: () => [], createElement: (tag) => new Element(tag), createTextNode: (text) => String(text), activeElement: null };
+  const intervals = new Map();
+  let elapsed = 0, nextInterval = 0;
+  const setInterval = (callback, delay) => {
+    assert.ok(delay > 0, "interval must have a positive delay");
+    const id = ++nextInterval;
+    intervals.set(id, { callback, delay, next: elapsed + delay });
+    return id;
+  };
+  const clearInterval = (id) => intervals.delete(id);
+  Object.assign(window, { setInterval, clearInterval });
   const context = vm.createContext({
-    CSS: { supports: () => true }, AbortController, URL, URLSearchParams, TextEncoder, setTimeout, clearTimeout, console, fetch, location,
+    CSS: { supports: () => true }, AbortController, URL, URLSearchParams, TextEncoder, setTimeout, clearTimeout, setInterval, clearInterval, console, fetch, location, window,
     history: { replaceState() { location.hash = ""; } }, navigator: { clipboard: { writeText: async () => {} } }, confirm: () => true,
-    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-    document: { getElementById: get, querySelectorAll: () => [], createElement: (tag) => new Element(tag), createTextNode: (text) => String(text), activeElement: null },
+    localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, String(value)), removeItem: (key) => storage.delete(key) },
+    document,
   });
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, "") + `\nglobalThis.api = { S, selectAccount, resetAccount, showSetup, submitSetup, configureAccountUI, loadPreferences, savePreferences, importCards, createInvitation, cardContent, boot, pollResults, post, logout };`, context);
-  return { api: context.api, nodes, location, get };
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, "") + `\nglobalThis.api = { S, selectAccount, resetAccount, showSetup, submitSetup, configureAccountUI, loadPreferences, savePreferences, importCards, createInvitation, cardContent, boot, pollResults, post, logout, showStart, showResults, show, startPass, takeMore, pickDeck, setPref, refreshDueCards: typeof refreshDueCards === "function" ? refreshDueCards : undefined };`, context);
+  return {
+    api: context.api, nodes, location, get, context, document, window, intervals,
+    get reloads() { return reloads; },
+    async advance(ms) {
+      const end = elapsed + ms;
+      while (true) {
+        const next = Math.min(...[...intervals.values()].map((timer) => timer.next));
+        if (next > end) break;
+        elapsed = next;
+        for (const timer of [...intervals.values()]) {
+          if (timer.next !== next) continue;
+          timer.next += timer.delay;
+          timer.callback();
+        }
+        await flushPage();
+      }
+      elapsed = end;
+      await flushPage();
+    },
+    async dispatch(target, type) { ({ window, document })[target].dispatch(type); await flushPage(); },
+  };
 }
 
 const response = (data, status = 200) => ({ status, ok: status >= 200 && status < 300, json: async () => data, clone() { return this; } });
@@ -265,4 +312,306 @@ test("account_changed body also fences legacy responses without an identity head
   api.selectAccount(account("owner"));
   await assert.rejects(api.post("api/preferences", { knowledge_decks: [] }), (err) => err.name === "StaleAccount");
   assert.equal(api.S.accountId, null);
+});
+
+const techDeck = (due) => ({ name: "Tech", due, fresh: 0 });
+
+function readyStart(page, decks = []) {
+  page.api.selectAccount(account("owner"));
+  Object.assign(page.api.S, { authed: true, screen: "start", decks });
+  page.api.pickDeck(decks[0]?.name ?? null);
+}
+
+function writtenResults(page, more = 0) {
+  readyStart(page);
+  Object.assign(page.api.S, { session: "finished-pass", deck: "Tech", answers: { 1: "typed answer" } });
+  page.api.showResults({
+    items: [{ n: 1, question: "Question", answer: "typed answer", back: "Key", grade: "Good" }],
+    confirmed: { 1: "Good" }, status: { written: true, more, message: "Saved safely." },
+  });
+}
+
+function refresh(page) {
+  assert.equal(typeof page.api.refreshDueCards, "function", "refreshDueCards must be available");
+  return page.api.refreshDueCards();
+}
+
+test("due refresh discovers an empty start screen on the minute without reloading", async () => {
+  const requests = [];
+  const page = pageHarness(async (path, init) => { requests.push({ path, init }); return response({ decks: [techDeck(3)] }); });
+  readyStart(page);
+  assert.equal(page.intervals.size, 1, "install one repeating timer once");
+  await page.advance(59999);
+  assert.equal(requests.length, 0);
+  await page.advance(1);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "api/decks");
+  assert.equal(requests[0].init.cache, "no-store");
+  assert.equal(requests[0].init.method ?? "GET", "GET");
+  assert.equal(page.api.S.deck, "Tech");
+  assert.equal(page.api.S.decks[0].due, 3);
+  assert.equal(page.get("start-empty").hidden, true);
+  assert.equal(page.get("start-count").max, "3");
+  assert.equal(page.get("start-go").disabled, false);
+  await page.advance(60000);
+  assert.equal(requests.length, 2);
+  assert.equal(page.intervals.size, 1);
+  assert.equal(page.reloads, 0);
+});
+
+for (const [target, event] of [["window", "focus"], ["document", "visibilitychange"], ["window", "pageshow"], ["window", "online"]]) {
+  test(`due refresh discovers new cards on ${event}`, async () => {
+    let calls = 0;
+    const page = pageHarness(async (path) => { assert.equal(path, "api/decks"); calls++; return response({ decks: [techDeck(3)] }); });
+    readyStart(page);
+    await page.dispatch(target, event);
+    assert.equal(calls, 1);
+    assert.equal(page.api.S.deck, "Tech");
+    assert.equal(page.api.S.decks[0].due, 3);
+    assert.equal(page.reloads, 0);
+  });
+}
+
+test("due refresh preserves selected deck and typed batch count", async () => {
+  const page = pageHarness(async () => response({ decks: [{ name: "English", due: 9 }, techDeck(5)] }));
+  readyStart(page, [techDeck(3)]);
+  page.get("start-count").value = "2";
+  await refresh(page);
+  assert.equal(page.api.S.deck, "Tech");
+  assert.equal(page.get("start-count").value, "2");
+  assert.equal(page.get("start-count").max, "5");
+  assert.equal(page.get("start-go").disabled, false);
+});
+
+for (const preferred of [null, "Science"]) {
+  test(`due refresh replaces a deleted selection using ${preferred ? "saved preference" : "the first due deck"}`, async () => {
+    const page = pageHarness(async () => response({ decks: [{ name: "English", due: 4 }, { name: "Science", due: 2 }] }));
+    readyStart(page, [techDeck(3)]);
+    if (preferred) page.api.setPref("deck", preferred);
+    await refresh(page);
+    assert.equal(page.api.S.deck, preferred ?? "English");
+    assert.equal(page.get("start-count").value, preferred ? "2" : "4");
+  });
+}
+
+test("due refresh updates written More availability without rebuilding results or changing answers", async () => {
+  let decks = [techDeck(3), { name: "English", due: 12 }];
+  const page = pageHarness(async () => response({ decks }));
+  writtenResults(page);
+  const { S } = page.api;
+  const rows = page.get("res-rows").children.slice();
+  const results = S.results, grades = S.grades, answers = S.answers;
+  const snapshot = JSON.stringify({ results, grades, answers, message: S.message, session: S.session });
+  await refresh(page);
+  assert.equal(S.more, 3);
+  assert.equal(page.get("take").hidden, false);
+  assert.equal(page.get("to-decks").hidden, true);
+  assert.equal(page.get("take-count").max, "3");
+  assert.equal(page.get("take-count").value, "3");
+  assert.equal(page.get("more").disabled, false);
+  page.get("take-count").value = "2";
+  await refresh(page);
+  assert.equal(page.get("take-count").value, "2", "preserve edited count even after blur");
+  decks = [techDeck(0), { name: "English", due: 12 }];
+  await refresh(page);
+  assert.equal(S.more, 0);
+  decks = [{ name: "English", due: 12 }];
+  await refresh(page);
+  assert.equal(S.more, 0, "missing selected deck is empty, regardless of other decks");
+  assert.equal(page.get("take").hidden, true);
+  assert.equal(page.get("to-decks").hidden, false);
+  assert.equal(page.get("take-count").max, "0");
+  assert.equal(page.get("more").disabled, true);
+  assert.equal(S.results, results); assert.equal(S.grades, grades); assert.equal(S.answers, answers);
+  assert.equal(page.get("res-rows").children.length, rows.length);
+  rows.forEach((row, index) => assert.equal(page.get("res-rows").children[index], row));
+  assert.equal(JSON.stringify({ results: S.results, grades: S.grades, answers: S.answers, message: S.message, session: S.session }), snapshot);
+  assert.equal(page.get("res-hint").textContent, "Saved safely.");
+  assert.equal(page.reloads, 0);
+});
+
+test("due refresh never overwrites a focused More count when availability first appears", async () => {
+  const page = pageHarness(async () => response({ decks: [techDeck(3)] }));
+  writtenResults(page);
+  page.document.activeElement = page.get("take-count");
+  page.get("take-count").value = "2";
+  await refresh(page);
+  assert.equal(page.get("take-count").value, "2");
+  assert.equal(page.get("take-count").max, "3");
+});
+
+test("due refresh does not request decks while hidden or ineligible", async () => {
+  const cases = [
+    { hidden: true }, { authed: false }, { screen: "input" }, { screen: "checking" },
+    { screen: "results", written: false }, { screen: "boot" }, { screen: "login" }, { screen: "setup" }, { screen: "error" }, { settings: true }, { starting: true },
+    { taking: true }, { importing: true }, { decksLoading: true },
+  ];
+  for (const state of cases) {
+    let calls = 0;
+    const page = pageHarness(async () => { calls++; return response({ decks: [] }); });
+    readyStart(page);
+    Object.assign(page.api.S, state);
+    page.document.hidden = Boolean(state.hidden);
+    await refresh(page);
+    await page.advance(60000);
+    for (const [target, event] of [["window", "focus"], ["window", "online"], ["window", "pageshow"], ["document", "visibilitychange"]]) await page.dispatch(target, event);
+    assert.equal(calls, 0, JSON.stringify(state));
+  }
+});
+
+test("due refresh waits for the initial showStart deck load", async () => {
+  const body = deferred(); let calls = 0;
+  const page = pageHarness(async () => { calls++; return { ...response({}), json: () => body.promise }; });
+  readyStart(page);
+  const initial = page.api.showStart();
+  await flushPage();
+  assert.equal(page.api.S.decksLoading, true);
+  await page.advance(60000);
+  await page.dispatch("window", "focus");
+  assert.equal(calls, 1);
+  body.resolve({ decks: [techDeck(3)] });
+  await initial;
+  assert.equal(page.api.S.decksLoading, false);
+  assert.equal(page.api.S.deck, "Tech");
+});
+
+test("due refresh coalesces a minute tick and concurrent resume events", async () => {
+  const body = deferred(); let calls = 0;
+  const page = pageHarness(async () => { calls++; return { ...response({}), json: () => body.promise }; });
+  readyStart(page);
+  await page.advance(60000);
+  await page.dispatch("window", "focus");
+  await page.dispatch("window", "online");
+  assert.equal(calls, 1);
+  body.resolve({ decks: [techDeck(3)] });
+  await flushPage();
+  assert.equal(page.api.S.deck, "Tech");
+});
+
+for (const change of ["account", "session", "screen", "settings", "starting", "taking", "importing", "decksLoading", "hidden"]) {
+  test(`due refresh discards delayed JSON after ${change} changes`, async () => {
+    const body = deferred();
+    const page = pageHarness(async () => ({ ...response({}), json: () => body.promise }));
+    readyStart(page, [techDeck(2)]);
+    const pending = refresh(page);
+    await flushPage();
+    if (change === "account") { page.api.selectAccount(account("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")); page.api.S.authed = true; }
+    else if (change === "session") page.api.S.session = "another-pass";
+    else if (change === "screen") page.api.S.screen = "checking";
+    else if (change === "hidden") page.document.hidden = true;
+    else page.api.S[change] = true;
+    const decks = page.api.S.decks;
+    const count = page.get("start-count").value;
+    body.resolve({ decks: [techDeck(99)] });
+    await pending;
+    assert.equal(page.api.S.decks, decks);
+    assert.equal(page.get("start-count").value, count);
+  });
+}
+
+test("due refresh invalidates responses across a screen departure and return", async () => {
+  const body = deferred();
+  const page = pageHarness(async () => ({ ...response({}), json: () => body.promise }));
+  readyStart(page, [techDeck(2)]);
+  const pending = refresh(page);
+  await flushPage();
+  page.api.S.settings = true; page.api.show();
+  page.api.S.settings = false; page.api.show();
+  body.resolve({ decks: [techDeck(99)] });
+  await pending;
+  assert.equal(page.api.S.decks[0].due, 2);
+});
+
+for (const operation of ["startPass", "takeMore", "importCards", "showStart"]) {
+  test(`due refresh discards delayed JSON after ${operation} enters and exits busy state`, async () => {
+    const body = deferred(); let deckCalls = 0;
+    const page = pageHarness(async (path) => {
+      if (path === "api/decks" && ++deckCalls === 1) return { ...response({}), json: () => body.promise };
+      if (path === "api/decks") return response({ decks: [techDeck(2)] });
+      if (operation === "importCards") throw new Error("Import failed");
+      return response({ error: "Temporarily unavailable" }, 500);
+    });
+    if (operation === "takeMore") writtenResults(page, 2);
+    else readyStart(page, [techDeck(2)]);
+    const pending = refresh(page);
+    await flushPage();
+    if (operation === "importCards") page.get("start-import-file").files = [{ name: "fixture.apkg", size: 42 }];
+    await page.api[operation](...(operation === "importCards" ? ["start-import"] : []));
+    assert.equal(page.api.S.starting, false);
+    assert.equal(page.api.S.taking, false);
+    assert.equal(page.api.S.importing, false);
+    const decks = page.api.S.decks, more = page.api.S.more;
+    const hint = page.get(operation === "takeMore" ? "res-hint" : "start-hint").textContent;
+    body.resolve({ decks: [techDeck(99)] });
+    await pending;
+    assert.equal(page.api.S.decks, decks);
+    assert.equal(page.api.S.more, more);
+    assert.equal(page.get(operation === "takeMore" ? "res-hint" : "start-hint").textContent, hint);
+  });
+}
+
+test("old due refresh completion cannot clear a replacement request token", async () => {
+  const first = deferred(), second = deferred(); let calls = 0;
+  const page = pageHarness(async () => ({ ...response({}), json: () => (++calls === 1 ? first.promise : second.promise) }));
+  readyStart(page, [techDeck(2)]);
+  const old = refresh(page);
+  await flushPage();
+  page.api.show();
+  const current = refresh(page);
+  await flushPage();
+  assert.equal(calls, 2);
+  const token = page.api.S.dueRefresh;
+  assert.ok(token);
+  first.resolve({ decks: [techDeck(99)] });
+  await old;
+  assert.equal(page.api.S.dueRefresh, token);
+  await page.dispatch("window", "focus");
+  assert.equal(calls, 2);
+  second.resolve({ decks: [techDeck(3)] });
+  await current;
+  assert.equal(page.api.S.decks[0].due, 3);
+  assert.equal(page.api.S.dueRefresh, null);
+});
+
+for (const screen of ["start", "results"]) {
+  test(`due refresh preserves ${screen} UI on failure and recovers on a later tick`, async () => {
+    let calls = 0;
+    const page = pageHarness(async () => { if (++calls === 1) throw new Error("Network failure"); return response({ decks: [techDeck(3)] }); });
+    if (screen === "results") writtenResults(page);
+    else { readyStart(page, [techDeck(2)]); page.api.S.message = "Keep this message"; page.api.pickDeck("Tech"); }
+    const decks = page.api.S.decks;
+    const hint = page.get(screen === "start" ? "start-hint" : "res-hint").textContent;
+    const message = page.api.S.message;
+    await page.advance(60000);
+    assert.equal(calls, 1);
+    assert.equal(page.api.S.decks, decks);
+    assert.equal(page.api.S.message, message);
+    assert.equal(page.get(screen === "start" ? "start-hint" : "res-hint").textContent, hint);
+    await page.advance(60000);
+    assert.equal(calls, 2);
+    assert.equal(screen === "start" ? page.api.S.decks[0].due : page.api.S.more, 3);
+  });
+}
+
+test("boot retains the finished deck for live More availability", async () => {
+  const page = pageHarness(async (path) => {
+    if (path === "api/session") return response({ ...account("owner"), state: "ready" });
+    if (path === "api/cards") return response({ session: "finished-pass", deck: "Tech", stage: "written", cards: [], due: 0 });
+    if (path === "api/results") return response({ items: [], confirmed: {}, status: { written: true, more: 0 } });
+    assert.equal(path, "api/decks");
+    return response({ decks: [techDeck(3)] });
+  });
+  await page.api.boot();
+  assert.equal(page.api.S.deck, "Tech");
+  await refresh(page);
+  assert.equal(page.api.S.more, 3);
+});
+
+test("account reset clears pending due refresh and initial deck loading", () => {
+  const page = pageHarness(async () => response({ decks: [] }));
+  readyStart(page);
+  Object.assign(page.api.S, { dueRefresh: {}, decksLoading: true });
+  page.api.resetAccount();
+  assert.equal(page.api.S.dueRefresh, null);
+  assert.equal(page.api.S.decksLoading, false);
 });

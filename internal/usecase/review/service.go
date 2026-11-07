@@ -171,7 +171,7 @@ func (s *Service) More(ctx context.Context, session string, count int) error {
 		s.mu.Unlock()
 		return err
 	}
-	if s.pass.Stage() != domain.StageWritten || s.pass.Status.More <= 0 {
+	if s.pass.Stage() != domain.StageWritten {
 		s.mu.Unlock()
 		return conflict(CodeEmpty, "this batch isn't saved yet or no cards are left")
 	}
