@@ -1,6 +1,7 @@
 "use strict";
 const GRADES = ["Again", "Hard", "Good", "Easy"];
 const POLL_MS = 1500;
+const DUE_REFRESH_MS = 60000;
 const STORE = "anki-review";
 const DEFAULT_BATCH = 25;
 const FIELD_SIZING = CSS.supports("field-sizing", "content");
@@ -12,7 +13,7 @@ const initialState = () => ({
   session: null, cards: [], screen: "boot", view: "card", idx: 0,
   answers: {}, touched: {}, grades: {}, open: null,
   results: null, locked: false, written: false, message: "", polling: null, more: 0, taking: false,
-  decks: [], deck: null, starting: false, gradeError: "",
+  decks: [], deck: null, starting: false, decksLoading: false, dueRefresh: null, gradeError: "",
   authed: false, settings: false, provider: "claude", graderConnected: false,
   accountId: null, isOwner: false, managed: false, multiAccount: false,
   knowledgeDecks: [], inviteLink: "", authBusy: false, importing: false,
@@ -245,6 +246,7 @@ function canLeave() {
 }
 
 function show() {
+  S.dueRefresh = null;
   // settings cover the screen underneath, so a poll that lands meanwhile can't pull the user away
   const active = S.settings ? "settings" : S.screen;
   const input = active === "input";
@@ -298,6 +300,7 @@ $("to-decks").addEventListener("click", backToDecks);
 
 async function showStart() {
   const epoch = accountEpoch;
+  S.decksLoading = true;
   S.screen = "start";
   S.session = null;
   S.message = "";
@@ -315,6 +318,8 @@ async function showStart() {
     if (interrupted(epoch, err)) return;
     S.decks = [];
     S.message = failure(err);
+  } finally {
+    if (currentAccount(epoch)) S.decksLoading = false;
   }
   const saved = pref("deck");
   pickDeck(S.decks.some((d) => d.name === saved) ? saved : (S.decks[0]?.name ?? null));
@@ -351,11 +356,46 @@ function renderStart() {
   hint.textContent = S.message || (deck ? `${deck.name}: how many cards to take?` : "");
 }
 
+function canRefreshDueCards() {
+  return S.authed && !document.hidden && !S.settings && !S.starting && !S.taking &&
+    !S.importing && !S.decksLoading && (S.screen === "start" || (S.screen === "results" && S.written));
+}
+
+async function refreshDueCards() {
+  if (!canRefreshDueCards() || S.dueRefresh) return;
+  const epoch = accountEpoch;
+  const screen = S.screen, session = S.session;
+  const token = (S.dueRefresh = Symbol("due-refresh"));
+  try {
+    const data = await requestJSON("api/decks", { cache: "no-store" });
+    if (!currentAccount(epoch) || S.dueRefresh !== token || S.screen !== screen ||
+        S.session !== session || !canRefreshDueCards()) return;
+    const decks = data.decks ?? [];
+    if (screen === "start") {
+      S.decks = decks;
+      if (decks.some((deck) => deck.name === S.deck)) renderStart();
+      else {
+        const saved = pref("deck");
+        pickDeck(decks.some((deck) => deck.name === saved) ? saved : (decks[0]?.name ?? null));
+      }
+    } else {
+      const preserveCount = S.more > 0;
+      S.more = decks.find((deck) => deck.name === S.deck)?.due ?? 0;
+      renderResultsAvailability(preserveCount);
+    }
+  } catch {
+    // Background failures preserve the current page; the next event or tick retries.
+  } finally {
+    if (S.dueRefresh === token) S.dueRefresh = null;
+  }
+}
+
 async function startPass() {
   const epoch = accountEpoch;
   const input = $("start-count");
   const deck = S.decks.find((d) => d.name === S.deck);
   if (!deck || S.starting || !validCount(input.value, deck.due)) return;
+  S.dueRefresh = null;
   const count = Number(input.value);
   setPref("batch", count);
   setPref("deck", deck.name);
@@ -692,7 +732,10 @@ function renderResults() {
   $("weak").hidden = weak.length === 0;
   $("chips").replaceChildren(...weak.map((t) => el("span", { class: "chip" }, t)));
   $("res-rows").replaceChildren(...S.results.map(resultRow));
+  renderResultsAvailability();
+}
 
+function renderResultsAvailability(preserveCount = false) {
   const hint = $("res-hint");
   const more = S.written && S.more > 0;
   hint.classList.toggle("bad", Boolean(S.message));
@@ -708,7 +751,7 @@ function renderResults() {
   input.max = String(S.more);
   input.disabled = S.taking;
   // never overwrite what is being typed
-  if (more && document.activeElement !== input) input.value = String(batchSize(S.more));
+  if (more && !preserveCount && document.activeElement !== input) input.value = String(batchSize(S.more));
   $("more").disabled = S.taking || !validCount(input.value, S.more);
   $("more").textContent = S.taking ? "Taking cards…" : "More cards";
   if (S.message) hint.textContent = S.message;
@@ -721,6 +764,7 @@ async function takeMore() {
   const epoch = accountEpoch;
   const input = $("take-count");
   if (S.taking || !validCount(input.value, S.more)) return;
+  S.dueRefresh = null;
   const count = Number(input.value);
   setPref("batch", count);
   S.taking = true;
@@ -1170,6 +1214,7 @@ async function importCards(prefix) {
   if (file.size > 8 * 1024 * 1024) return say(`${prefix}-status`, "The package must be at most 8 MiB. Export with Support older Anki versions enabled.", true);
   if (!file.name.toLowerCase().endsWith(".apkg")) return say(`${prefix}-status`, "Choose an .apkg package. Export with Support older Anki versions enabled.", true);
   if (!collectionAvailable() || S.importing) return say(`${prefix}-status`, "Finish or drop the current batch before importing cards.", true);
+  S.dueRefresh = null;
   S.importing = true;
   configureAccountUI();
   say(`${prefix}-status`, "Importing cards, media and scheduling…");
@@ -1252,6 +1297,7 @@ async function boot() {
   } catch (error) { if (!interrupted(epoch, error)) showError(); return; }
   if (data.stage === "idle") return showStart();
   S.session = data.session;
+  S.deck = data.deck;
   S.cards = data.cards;
   const saved = load(data.session);
   if (saved) {
@@ -1275,5 +1321,9 @@ async function boot() {
     showResults(results);
   } catch (error) { if (!interrupted(epoch, error)) showError(); }
 }
+
+setInterval(refreshDueCards, DUE_REFRESH_MS);
+document.addEventListener("visibilitychange", refreshDueCards);
+for (const event of ["focus", "pageshow", "online"]) window.addEventListener(event, refreshDueCards);
 
 boot();
