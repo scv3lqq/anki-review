@@ -30,6 +30,11 @@ Run commands from the repository root.
 - `make build-linux`: build the Linux amd64 binary for the deploy kit.
 - `make run`: run locally, loading optional settings from the ignored `.env`.
 
+## Git workflow
+
+- Finish verified changes with commit, push and merge, then switch to local `main`
+  and fast-forward to `origin/main`. Preserve unrelated work and report real blockers.
+
 ## Setup, deployment, and data safety
 
 Use `$setup-anki-review`, defined in
