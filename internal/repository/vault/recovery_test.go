@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -285,5 +286,71 @@ func TestRecoveryDisabledLegacyModeHasNoPersistentSessions(t *testing.T) {
 	}
 	if _, err := v.Open(testUser, testPassword); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRecoveryWrongKeyPreservesVaultAndGuidance(t *testing.T) {
+	dir := t.TempDir()
+	v := recoveryVault(t, dir, recoveryKey(t), "account-a")
+	if err := v.SealSessions(testUser, testPassword, testSecrets, recoverySessions()); err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+	before, err := os.ReadFile(v.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongKey := filepath.Join(t.TempDir(), "wrong-session.key")
+	if err := os.WriteFile(wrongKey, bytes.Repeat([]byte{0x71}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted := recoveryVault(t, dir, wrongKey, "account-a")
+	for _, operation := range []struct {
+		name string
+		run  func() error
+	}{
+		{name: "load sessions", run: func() error { _, err := restarted.LoadSessions(); return err }},
+		{name: "recover credentials", run: func() error { _, err := restarted.Recover(); return err }},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			err := operation.run()
+			if !errors.Is(err, ErrDamaged) {
+				t.Fatalf("wrong recovery key = %v, want damaged", err)
+			}
+			if strings.Contains(err.Error(), "delete") || strings.Contains(err.Error(), "remove") {
+				t.Error("wrong-key diagnostic recommends destructive vault deletion")
+			}
+			if !strings.HasSuffix(err.Error(), "; preserve the vault and follow the documented recovery procedure") {
+				t.Errorf("wrong-key diagnostic lacks preservation advice: %v", err)
+			}
+			after, err := os.ReadFile(v.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("wrong recovery key changed the vault bytes")
+			}
+		})
+	}
+}
+
+func TestRecoveryDamagedPreservationGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "without path", want: "vault damaged: synthetic cause; preserve the vault and follow the documented recovery procedure"},
+		{name: "with path", path: "synthetic/vault.json", want: "vault damaged: synthetic/vault.json: synthetic cause; preserve the vault and follow the documented recovery procedure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := damaged(tc.path, "synthetic cause")
+			if !errors.Is(err, ErrDamaged) {
+				t.Fatal("preservation guidance lost ErrDamaged identity")
+			}
+			if err.Error() != tc.want {
+				t.Errorf("damaged() = %q, want %q", err.Error(), tc.want)
+			}
+		})
 	}
 }

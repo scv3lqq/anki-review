@@ -46,7 +46,7 @@ const (
 	maxThreads   = 16
 )
 
-// ErrDamaged means the file is not a vault this version can open. Deleting it starts setup over.
+// ErrDamaged means the vault cannot be opened. Preserve it and follow the documented recovery procedure.
 var ErrDamaged = errors.New("vault damaged")
 
 // ErrLocked means no successful Seal or Open has supplied a current encryption key.
@@ -343,12 +343,12 @@ func parse(raw []byte) (file, []byte, []byte, []byte, error) {
 	return f, salt, nonce, sealed, nil
 }
 
-// damaged names the file (when known) and says how to recover.
+// damaged preserves the cause and optional path, directing recovery without deleting the vault.
 func damaged(path, reason string) error {
 	if path == "" {
-		return fmt.Errorf("%w: %s; delete the vault file to set up again", ErrDamaged, reason)
+		return fmt.Errorf("%w: %s; preserve the vault and follow the documented recovery procedure", ErrDamaged, reason)
 	}
-	return fmt.Errorf("%w: %s: %s; delete it to set up again", ErrDamaged, path, reason)
+	return fmt.Errorf("%w: %s: %s; preserve the vault and follow the documented recovery procedure", ErrDamaged, path, reason)
 }
 
 func checkCost(time, memoryKiB uint32, threads uint8) error {

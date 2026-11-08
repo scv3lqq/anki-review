@@ -296,3 +296,17 @@ also including unrelated new session-key preflight. End extraction at the explic
 marker and verify it exists, retaining all expected source/kit/missing binary assertions.
 Gates: `go test -race ./internal/provisioner -run TestInstallerBinaryLayouts`,
 `golangci-lint run ./internal/provisioner/...`. Independent reviewer verifies unchanged assertions.
+
+## Iteration 2: final acceptance correction
+### T2-F2: safe vault error guidance
+Final validator reproduced a wrong recovery key propagating destructive legacy advice:
+`vault damaged: recovery authentication failed; delete the vault file to set up again`.
+Own `internal/repository/vault/vault.go`, `recovery_test.go` (original T2 implementer).
+Keep ErrDamaged identity, cause and optional path, but replace both deletion suffixes in damaged()
+with `; preserve the vault and follow the documented recovery procedure`. Update its comment and
+ErrDamaged comment consistently; encryption and all disk writes remain unchanged.
+Test first: wrong protected key rejects recovery, vault bytes remain identical and errors never
+recommend deletion; assert the exact preservation advice for both path/no-path helper branches.
+Archive RED before source. Gates: `go test -race ./internal/repository/vault`,
+`golangci-lint run ./internal/repository/vault/...`. Fresh independent scoped review and final full
+Gates are required for the changed tree; preserve prior evidence for unchanged files.
