@@ -3,7 +3,7 @@
 # user restart the service without sudo, CLI version checks in the service sandbox, then enable
 # --now. The Claude token and the AnkiConnect key are not handled here: the owner enters them on the
 # setup page, where the server seals them with the owner's password. Idempotent: rerun it to change a
-# setting or move Claude Code to CLAUDE_VERSION. Codex stays pinned to the validated release. A restart leaves the service locked until a login.
+# setting or move Claude Code to CLAUDE_VERSION. Codex stays pinned to the validated release. Existing browser sessions can recover after restart; interrupted work requires Resume.
 #
 # Usage: sudo /abs/path/install.sh [DEPLOY_DIR]
 #   DEPLOY_DIR: argument, else ANKI_REVIEW_DEPLOY_DIR, else <home of SUDO_USER>/anki-review-deploy.
@@ -81,7 +81,7 @@ deploy_signers="$deploy_dir/allowed_signers"
 deploy_unit_dst="/etc/systemd/system/$deploy_svc.service"
 deploy_timer_dst="/etc/systemd/system/$deploy_svc.timer"
 
-for f in "$bin_src" "$unit_src" "$smoke" "$deploy_dir/provider.sh"; do
+for f in "$bin_src" "$unit_src" "$smoke" "$deploy_dir/provider.sh" "$deploy_dir/session-key.py"; do
   [[ -f $f ]] || fail "missing $f"
 done
 [[ -f $key_file ]] || fail "missing $key_file: run $deploy_dir/anki/up.sh as $deploy_user first"
@@ -96,6 +96,23 @@ fi
 if [[ -n ${ANKI_CONNECT_PORT:-} && -z ${ANKI_CONNECT_URL:-} ]]; then
   [[ $ANKI_CONNECT_PORT =~ ^[0-9]+$ ]] || fail "bad ANKI_CONNECT_PORT: $ANKI_CONNECT_PORT"
   ANKI_CONNECT_URL="http://127.0.0.1:$ANKI_CONNECT_PORT"
+fi
+
+# Validate a configured recovery key before any installer mutation. An explicit empty
+# setting retains password-only mode only for vaults without an existing recovery envelope.
+[[ ! -L $env_file ]] || fail "refusing symlink environment file"
+session_key_file=/etc/anki-review/session.key
+session_key_configured=false
+if [[ -f $env_file ]] && grep -q '^[[:space:]]*SESSION_KEY_FILE[[:space:]]*=' "$env_file"; then
+  [[ $(grep -c '^[[:space:]]*SESSION_KEY_FILE[[:space:]]*=' "$env_file") == 1 ]] || fail "duplicate SESSION_KEY_FILE setting"
+  grep -q '^SESSION_KEY_FILE=' "$env_file" || fail "SESSION_KEY_FILE must use NAME=value syntax"
+  session_key_configured=true
+  session_key_file="$(provider_env_value "$env_file" SESSION_KEY_FILE)"
+  if [[ -n $session_key_file ]]; then
+    session_gid="$(getent group "$svc" | cut -d: -f3)"
+    [[ -n $session_gid ]] || fail "configured session key service group is missing"
+    python3 -I "$deploy_dir/session-key.py" "${session_key_file%/*}" --file "$session_key_file" --uid 0 --gid "$session_gid" || fail "configured session key is missing or unsafe"
+  fi
 fi
 
 # Sets NAME=VALUE in the env file (replacing the line or appending it), root:anki-review 0640.
@@ -175,6 +192,9 @@ echo "== user $svc"
 if ! id -u "$svc" >/dev/null 2>&1; then
   useradd --system --user-group --home-dir "$home" --no-create-home \
     --shell /usr/sbin/nologin --comment "anki-review service" "$svc"
+fi
+if [[ $session_key_configured == false ]]; then
+  python3 -I "$deploy_dir/session-key.py" "$env_dir" --uid 0 --gid "$(id -g "$svc")" --allow-create || fail "cannot provision session key"
 fi
 install -d -o "$svc" -g "$svc" -m 0700 "$home"
 
@@ -258,6 +278,7 @@ EOF
   mv -f "$tmp" "$env_file"
 fi
 drop_secret_lines
+set_env_line SESSION_KEY_FILE "$session_key_file"
 set_env_line GRADER_PROVIDER "$provider"
 set_env_line CLAUDE_BIN "$claude_bin"
 set_env_line CODEX_BIN "$codex_bin"
@@ -425,7 +446,7 @@ if s.get("state") == "setup":
 elif s.get("unlocked"):
     print("owner: unlocked")
 else:
-    print("owner: locked (log in on the page)")
+    print("owner: locked (existing browser session may recover; otherwise log in on the page)")
 if "stage" in s:
     print("api stage:", s["stage"])
 '

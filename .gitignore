@@ -8,6 +8,10 @@
 *.test
 *.out
 
+# Server recovery keys must remain outside the repository. Guard accidental copies too.
+**/session.key
+**/.session-key.*
+
 # local environment
 .env
 .env.*

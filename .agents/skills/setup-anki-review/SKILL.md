@@ -51,8 +51,8 @@ Rules for every mode:
   access-repair command still follows the active session's permission policy; never infer approval
   from a tool name or assume the runtime will display a permission prompt.
 - Setup never writes to the user's Anki: no `POST` to the API (`/api/confirm` above all), never the
-  page's button that writes grades, AnkiConnect only through the scripts here (`version`,
-  `deckNames`). Unlocking a server on the page (setup or login) can resume a saved pass: step 4.
+  page's button that writes grades or **Resume**, AnkiConnect only through the scripts here
+  (`version`, `deckNames`). Login and session recovery load saved passes passively: step 4.
 - Settings live in `.env` (gitignored; `make run` reads it, the scripts here too, and it wins over
   the environment). Outside `check` mode, when it is missing: `git check-ignore -q .env` must succeed, then
   `cp .env.example .env`. Missing values: ask for all of them in one message, then set the lines
@@ -147,10 +147,12 @@ name (AnkiWeb or a self-hosted one); anki-review only presses Sync, so nothing h
 
 ## 4. Run, set up and verify
 
-A `data` warn first: a saved pass with confirmed grades goes to Anki, one waiting for grading goes
-to the saved grading provider, once the owner unlocks the server on the page (setup or login). The server starts
-locked, so starting it alone does nothing. Tell the user; ask whether to unlock anyway or move
-`data/state.json` aside. The risky moment is pressing **Set up** or **Log in**.
+A `data` warn identifies interrupted work. A saved checking or confirmed pass loads passively,
+including after login or session recovery. The owner decides when to click **Resume checking** or
+**Resume saving to Anki**. Never move `data/state.json` aside, unlock, or resume it as a diagnostic.
+With a configured server key, valid browser sessions survive restart until their original expiry;
+existing accounts need one password login after first enabling recovery. See the deployment key
+maintenance procedure before changing keys or disabling recovery.
 
 By the step 1 `port` line:
 
@@ -165,13 +167,13 @@ curl -sS --fail-with-body --retry 10 --retry-connrefused --retry-delay 1 http://
 ```
 
 A fresh checkout answers `"state":"setup","unlocked":false`; a set-up owner answers
-`"state":"login"` with `"unlocked":false` after a restart. The review routes need the login cookie,
+`"state":"login"` with `"unlocked":false` until login or lazy browser-session recovery. The review routes need the login cookie,
 so the skill checks only this GET. Give the URL <http://127.0.0.1:8767/> and explain the setup form
 (the rules above): owner login, password of at least 12 characters, selected provider credentials, AnkiConnect key.
 The user fills it in and presses **Set up**; the server checks AnkiConnect and the selected grader, which takes up to a minute.
 Then rerun the same GET without the retry flags: `"unlocked":true` (`"state":"login"` is normal for
-a request without the cookie). `"stage"` appears with it: `idle` (another stage: a saved pass
-resumed). A failed check comes back on the page under the field: wrong key, Anki not running, or the
+a request without the cookie). `"stage"` appears with it: `idle` or the preserved saved-pass stage;
+checking/confirmed work remains paused until an explicit **Resume**. A failed check comes back on the page under the field: wrong key, Anki not running, or the
 selected grading credential refused; fix that field or repeat Codex device login.
 Server gone: its output names the cause. This server lives as long as the session (lasting: `make
 run` in a terminal, or step 5).
@@ -241,8 +243,8 @@ anki-review`; state: `systemctl --user show -p ActiveState -p MainPID anki-revie
 disable --now anki-review`, delete the unit, `daemon-reload`.
 
 Verify: `check.sh` shows this checkout's binary serving with the pid launchd or systemd reports,
-and the `/api/session` check of step 4 passes. After any restart the server is locked until the user
-logs in on the page: say so when you restart it.
+and the `/api/session` check of step 4 passes. After restart, valid browser sessions can recover
+with a configured server key; legacy mode needs password login. Interrupted work still needs **Resume**.
 
 ## 6. Report
 
@@ -262,7 +264,7 @@ flows. Auto-deploy holds; update both binaries and the separate root broker expl
 
 Before HTTP maintenance, stop HTTP and run the private administrator stage-summary
 helper for every account, preserving backups and saved passes. Ask the owner how to
-handle checking/confirmed passes before requesting any unlock. Never log in, import
+handle checking/confirmed passes before any explicit Resume. Login and recovery remain passive. Never log in, import
 packages, grade or save confirmed grades as a setup diagnostic. The owner and invited
 users enter their own explicit grader credentials through the page; do not read them.
 Provision guests as empty, isolated, no-sync runtimes, without AnkiWeb/VNC setup or

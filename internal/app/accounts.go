@@ -2,11 +2,14 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -26,6 +29,7 @@ type accountFactory struct {
 	mu       sync.Mutex
 	cfg      config.Config
 	log      zerolog.Logger
+	registry accounts.Store
 	broker   runtimeBroker
 	runtimes map[string]*App
 }
@@ -74,12 +78,49 @@ func (f *accountFactory) Open(ctx context.Context, record accounts.Record) (*acc
 	return f.runtime(record.ID, a), nil
 }
 
+// ResolveSession inspects authenticated vault metadata before provisioning a runtime.
+func (f *accountFactory) ResolveSession(token string) (string, bool) {
+	if token == "" || len(token) > 256 || f.cfg.SessionKeyFile == "" || f.registry == nil {
+		return "", false
+	}
+	state, err := f.registry.Load()
+	if err != nil || len(state.Accounts) > 8 {
+		return "", false
+	}
+	digest := sha256.Sum256([]byte(token))
+	hash := hex.EncodeToString(digest[:])
+	for _, record := range state.Accounts {
+		if record.Pending || (record.ID != "owner" && !runtimebroker.ValidID(record.ID)) {
+			continue
+		}
+		directory := f.cfg.DataDir
+		if record.ID != "owner" {
+			directory = filepath.Join(directory, "accounts", record.ID)
+		}
+		v, err := vault.New(directory, vault.WithSessionKey(f.cfg.SessionKeyFile, record.ID))
+		if err != nil {
+			continue
+		}
+		sessions, err := v.LoadSessions()
+		v.Close()
+		if err != nil {
+			continue
+		}
+		for _, session := range sessions {
+			if session.Hash == hash && time.Now().Before(session.Expires) {
+				return record.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
 func (f *accountFactory) Remove(ctx context.Context, id string) error {
 	if !runtimebroker.ValidID(id) {
 		return accounts.ErrForbidden
 	}
 	directory := filepath.Join(f.cfg.DataDir, "accounts", id)
-	v, err := vault.New(directory)
+	v, err := vault.New(directory, vault.WithSessionKey(f.cfg.SessionKeyFile, id))
 	if err != nil {
 		return fmt.Errorf("inspect pending account: %w", accounts.ErrUnavailable)
 	}

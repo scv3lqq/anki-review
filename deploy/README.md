@@ -38,7 +38,7 @@ shell expands `~` before ssh sends the command.
 1. Build the binary: `make build-linux`.
 2. Copy the kit and the binary (`scp` takes `-P` for the port):
    `SSH 'mkdir -p DIR/bin && chmod 700 DIR'`,
-   `scp -r deploy/anki deploy/systemd deploy/install.sh deploy/smoke.sh deploy/provider.sh deploy/test-provider.sh deploy/autodeploy.sh <user>@<server>:DIR/`,
+   `scp -r deploy/anki deploy/systemd deploy/install.sh deploy/smoke.sh deploy/provider.sh deploy/test-provider.sh deploy/session-key.py deploy/test-session-key.py deploy/autodeploy.sh <user>@<server>:DIR/`,
    `scp bin/anki-review-linux-amd64 <user>@<server>:DIR/bin/anki-review`.
 3. Start Anki as the deploy user, no sudo: `SSH DIR/anki/up.sh` (AnkiWeb) or
    `SSH DIR/anki/up.sh self-hosted`. It creates the AnkiConnect key, the VNC password and the sync
@@ -227,11 +227,65 @@ and disk encryption. Linux login uses a private memory-backed folder under `/dev
 The CLI refreshes the imported session during checks and grading. The service reseals every
 changed snapshot before accepting results, including refresh after a failed call. A revoked or
 expired refresh token requires a new dedicated device login and another file import in Settings.
-A restart always locks the app until owner login; unlocking may resume a saved pass. Review the
-saved-pass warning before unlocking. During Linux grading, credentials exist only in a private
+A configured recovery key lets valid browser sessions recover after restart; otherwise password
+login is needed. Saved passes load passively and require explicit **Resume** for interrupted work. During Linux grading, credentials exist only in a private
 0700 temporary home on tmpfs (0600 auth file), removed after the call. The service verifies the
 filesystem and fails closed if its runtime is not memory-backed. It does not keep CLI sessions
 or card logs. Root and the unlocked service user can still read live credentials.
+
+## Persistent browser sessions
+
+The installers enable recovery on first installation or upgrade only when the existing environment
+has no `SESSION_KEY_FILE` entry. They generate an independent 32-byte key on the host at
+`/etc/anki-review/session.key`, owned by `root:anki-review` mode `0640` in a `0750` directory.
+They validate existing configured key metadata before changing the installation and never overwrite,
+rotate or regenerate a missing key. Only the path is stored in `/etc/anki-review/env`.
+A custom existing absolute path is retained. Keep keys outside the repository and application data;
+a regular non-symlink file, exactly 32 bytes, mode `0600` or `0640`, and protected ancestors are required.
+Do not display key bytes. `session-key.py` reports validation only, without key contents.
+
+Each existing account needs one successful password login after enabling recovery. Later valid
+browser cookies restore only their own account until the original 30-day expiry; restart never
+extends it. Logout durably revokes the current session. Password changes revoke other sessions
+while preserving the initiating session's original expiry. Every account's saved review loads
+passively: status, login, recovery and polling never resume grading or confirmed writes. The owner
+must click **Resume checking** or **Resume saving to Anki**; diagnostics never press those buttons.
+
+The recovery envelope wraps the password-derived vault key and hashed session metadata.
+Application data plus the server key decrypts provider credentials without the password. A data-only
+backup without the server key retains password protection. Store key backups separately with
+restricted access; encrypt and protect any full host backup containing both. Include the configured
+key in a deliberate full recovery set, retain ownership/modes, and test restore on disposable copies.
+
+An empty `SESSION_KEY_FILE` preserves legacy password-only operation only before any recovery
+envelope exists. If recovery already exists, an empty setting fails closed too. A configured missing,
+unsafe or wrong key prevents startup; never rerun an installer expecting a replacement key.
+
+For a lost key, restore the exact key from a protected backup first. If that is impossible, an
+administrator may deliberately migrate offline, revoking every browser session:
+
+1. Stop HTTP and preserve protected backups of the entire application data, environment and any
+   remaining key. In multi-account mode inspect every saved pass privately and follow the consistent
+   broker/collection backup procedure below. Preserve account registry, preferences and all passes.
+2. In each existing account's `vault.json`, atomically remove only the optional top-level `recovery`
+   field, preserving version, login, KDF and password ciphertext byte values and private file metadata.
+   Do not delete vaults, reset secrets, change providers or modify review state. No password is read
+   by the administrator or tool. With HTTP stopped, removing all recovery envelopes revokes sessions.
+3. To disable recovery, explicitly clear `SESSION_KEY_FILE`. To rotate or re-enable it, move the old
+   key to protected backup storage, deliberately provision a fresh key with the helper's
+   `--allow-create --uid 0 --gid <anki-review-group-id>` arguments and the chosen protected directory,
+   and configure its absolute path. This is an intentional administrator action, never installer repair.
+4. Start the matching HTTP binary and verify public status without cookies. Accounts remain
+   inaccessible until their owners enter their existing passwords on the normal login page. That
+   login recreates recovery when enabled. Do not claim restored access before it succeeds.
+   Saved passes remain passive and need explicit **Resume**.
+
+Use the same offline procedure for deliberate key rotation, even when the old key is available;
+removing every recovery envelope revokes old browser sessions. Rotation alone does not replace
+the password-derived vault key. Old data plus its old server key can expose that derived key and
+may decrypt later credential reseals that keep the same KDF. If exposure is suspected, after
+password login the owner must deliberately change the password through Settings to reseal with
+a fresh KDF. Keep old backups protected because their old data and old key remain decryptable.
 
 ## Sync server: AnkiWeb or self-hosted
 
@@ -289,8 +343,8 @@ server's copy with a full upload. A copy of the server's data, from `DIR`:
   `/etc/polkit-1/rules.d/50-anki-review.rules`, which lets the deploy user (the one who ran it through
   sudo) start, stop and restart `anki-review.service` and nothing else. It needs polkit 0.106 or
   newer (`polkitd`); without it `install.sh` says so and a restart needs `sudo`.
-- A restart locks the service: the tokens leave memory with the process. Log in on the page to unlock
-  grading again. A pass in progress resumes after the login.
+- A restart clears process memory. With recovery configured, valid browser sessions recover lazily
+  until their original expiry; otherwise log in on the page. Interrupted passes require **Resume**.
 - Tokens and password: the Settings screen on the page (log in first). An empty field keeps its
   current value. `install.sh` takes no token.
 - Server settings: `sudo env KNOWLEDGE_DECKS=Tech,Career DIR/install.sh DIR` (also `PORT`,
@@ -319,8 +373,8 @@ authenticated `/api/media/` endpoint after the Go sanitizer removes active conte
 
 An image refresh does not rewrite saved pass HTML: existing saved HTML stays intact
 until the normal next pass. Do not reset the owner's pass to refresh cached HTML,
-and do not unlock any account automatically. Unlocking can resume grading or
-confirmed writes. Detect multi-account mode before uploading or running setup;
+and do not unlock any account automatically. Login and session recovery load saved passes
+passively; interrupted grading or confirmed writes require the owner's explicit **Resume**. Detect multi-account mode before uploading or running setup;
 use [multi-account image maintenance](#native-audio-image-maintenance) for that mode.
 
 For a single owner, complete the setup skill's status/saved-pass checks first and
@@ -337,7 +391,7 @@ Transfer the matching kit, then, as the same deploy user with the recorded UID/G
 and port environment, run only the desktop service:
 `docker compose --project-directory DIR/anki -f DIR/anki/compose.yaml up -d --build --no-deps anki`.
 Verify the recreated desktop has the same volume, secrets, network and endpoint,
-then start the matching HTTP binary and verify public status while locked.
+then start the matching HTTP binary and verify public status without an authenticated cookie.
 Do not run `S up` for an audio-only update. It uses the ordinary full setup path,
 which can also recreate or stop the sync service. Roll back with the matching old
 kit/image and binary while HTTP and the desktop are stopped, retaining the same data.
@@ -363,7 +417,8 @@ reaches into the server and GitHub holds no credential of it: every 5 minutes
 7. stages the binary, restarts the service through the polkit rule and waits for `/api/session`. No
    answer in 30 s: the previous binary goes back and the commit is skipped.
 
-Each deploy locks the service until you log in on the page, like any restart.
+After deployment, valid browser sessions can recover with the configured server key until their
+original expiry. Password-only mode requires login. Interrupted checking or saving waits for **Resume**.
 
 Turn it on:
 
@@ -410,15 +465,21 @@ your next signed commit on top.
   creates private `/run/anki-review` (0700), with `TMPDIR` pointing there for tmpfs auth files.
   The service `HOME` remains `/var/lib/anki-review`; CLI calls isolate their own temporary home.
 - Grading credentials and the AnkiConnect key are sealed in `/var/lib/anki-review/data/vault.json` (0600),
-  under a key from Argon2id of the owner's password, with XChaCha20-Poly1305. The env file holds no
-  secret. Credentials are decrypted after owner login. Codex auth snapshots also exist in temporary
-  private tmpfs files during calls, and are removed afterward.
-- What this does not protect: root on the host, and the `anki-review` user, can read the memory of the
-  running service and so the tokens. A copy of the disk, a backup or a snapshot is protected only by
-  the password. Because the AnkiConnect key is also in `DIR/anki/secrets/`, the vault mainly guards the
-  grading credentials.
-- No recovery for a forgotten password: `sudo rm /var/lib/anki-review/data/vault.json`, then
-  `systemctl restart anki-review`, then set up again on the page (grading credentials and AnkiConnect key again).
+  under a key from Argon2id of the owner's password, with XChaCha20-Poly1305. With recovery enabled,
+  an independent server key also wraps the password-derived key and hashed session metadata.
+  Valid browser sessions can recover credentials after restart without entering the password;
+  anonymous requests cannot recover them. The env file holds only the key path, never key bytes.
+  Codex auth snapshots exist in private temporary tmpfs files during calls and are removed afterward.
+- What this protects: a data-only backup without the independent server key retains password
+  protection. Application data plus the server key decrypts credentials without the password;
+  encrypt and protect full host backups that contain both. Root and the `anki-review` user can read
+  live credentials. Because the AnkiConnect key also exists in `DIR/anki/secrets/`, the vault mainly
+  guards grading credentials.
+- There is no password-reset flow. A missing configured server key prevents startup; restore its
+  protected backup or follow the explicit [offline recovery migration](#persistent-browser-sessions).
+  Migration removes only recovery envelopes, preserving password ciphertext and all saved account
+  data, then the owner enters their existing password on the normal page. Never delete a vault to
+  repair a lost key. Login and recovery are passive; interrupted work still requires **Resume**.
 
 ## Multi-account deployment
 
@@ -446,8 +507,8 @@ provisioning fails closed if quota mounting or resource ownership cannot be prov
 ### Enable invitations on an existing deployment
 
 1. Follow the setup skill's saved-pass checks before stopping or restarting HTTP.
-   Stop `anki-review` for the maintenance window; every account will be locked after
-   restart. Inspect all saved passes with the administrator-only helper described
+   Stop `anki-review` for the maintenance window; valid browser sessions can recover after
+   restart when configured. Inspect all saved passes with the administrator-only helper described
    below. Preserve an application/collection backup before changing configuration.
    No verification step should unlock an account, grade cards or write confirmed grades.
 2. Build and transfer `make build-linux build-provisioner-linux`, the deploy kit,
@@ -496,9 +557,9 @@ prior binaries and the matching daemon configuration for rollback.
 After stopping HTTP, an administrator runs `python3 DIR/check-passes.py
 /var/lib/anki-review/data` locally on the server. It reports stages/counts only,
 including all guest states. An active checking/confirmed pass needs the owner's
-explicit decision before any account is asked to unlock: login can resume grading
-or confirmed writes. Never move/delete saved passes or log users in as a diagnostic.
-Restart leaves every account locked; restarting the broker alone does not authorize
+explicit decision before **Resume checking** or **Resume saving to Anki**. Login and session
+recovery load passes passively. Never move/delete saved passes or log users in as a diagnostic.
+Restart can preserve valid browser sessions; restarting the broker alone does not authorize
 review writes. Broker storage and keys must remain root-only and survive restarts.
 
 Rollback: stop HTTP and the broker, gracefully stop the explicitly selected guest
@@ -537,7 +598,7 @@ Use an explicit maintenance window:
    their existing storage and recreates the removed guest containers from the new
    image with the same endpoints and keys. Verify image, labels and storage identity
    before starting the matching HTTP binary. Preserve every account's vault, pass
-   and preferences. All accounts remain locked; no diagnostic should unlock them.
+   and preferences. Accounts load passively; no diagnostic should unlock them or press **Resume**.
 
 Do not reset the owner's pass or replace its collection to refresh old rendered HTML.
 Saved HTML remains unchanged until a normal next pass. For rollback, stop HTTP and
@@ -576,9 +637,8 @@ offline filesystem-image recovery set.
 Restore each complete per-ID directory to its original absolute broker root and
 restore matching daemon UID/GID/quota settings. Preserve file ownership, private
 permissions, filesystem UUID and original storage.img backing path before starting the
-broker and HTTP. Do not regenerate keys against restored vaults. All accounts start
-locked; verify only public status before the owners decide whether to unlock saved
-passes. Test recovery on disposable copies. Deleting an application vault destroys
+broker and HTTP. Do not regenerate keys against restored vaults. Verify only public status
+without cookies; valid sessions may recover, while interrupted saved passes await **Resume**. Test recovery on disposable copies. Deleting an application vault destroys
 access to its encrypted grader session; there is no password recovery. Deprovision
 only explicitly selected broker-labelled guest resources after backup, never the
 reserved owner account or another guest's mount. The broker's Remove operation

@@ -13,6 +13,7 @@ type CardView struct {
 
 // CardsView is the current pass for the answer screen.
 type CardsView struct {
+	Paused     bool            `json:"paused"`
 	Stage      domain.Stage    `json:"stage"`
 	Session    string          `json:"session,omitempty"`
 	Kind       domain.Kind     `json:"kind,omitempty"`
@@ -44,6 +45,7 @@ type ResultItem struct {
 
 // ResultsView is the graded pass for the results screen.
 type ResultsView struct {
+	Paused    bool                 `json:"paused"`
 	Session   string               `json:"session"`
 	Confirmed map[int]domain.Grade `json:"confirmed"`
 	Status    *domain.Status       `json:"status"`

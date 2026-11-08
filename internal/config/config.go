@@ -15,6 +15,7 @@ import (
 
 // Config is everything the server needs; see the README for each variable.
 type Config struct {
+	SessionKeyFile string
 	AccountSocket  string
 	MaxAccounts    int
 	Port           int
@@ -45,6 +46,7 @@ func Load(getenv func(string) string) (Config, error) {
 		return def
 	}
 	c := Config{
+		SessionKeyFile: get("SESSION_KEY_FILE", ""),
 		AccountSocket:  get("ACCOUNT_SOCKET", ""),
 		DataDir:        get("DATA_DIR", "data"),
 		AnkiURL:        get("ANKI_CONNECT_URL", "http://127.0.0.1:8765"),

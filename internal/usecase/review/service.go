@@ -30,6 +30,8 @@ const (
 type Options struct {
 	// KnowledgeDecks are top-level decks graded by meaning; the rest are language decks.
 	KnowledgeDecks []string
+	// PauseOnLoad requires explicit Resume before interrupted grading or writes restart.
+	PauseOnLoad bool
 	// Sync with Anki's sync server before taking cards and after writing grades.
 	Sync       bool
 	Log        zerolog.Logger
@@ -49,6 +51,8 @@ type Service struct {
 	grading  bool
 	applying bool
 	taking   bool
+	paused   bool
+	closed   bool
 
 	// gradeCtx is canceled by Close: grading in flight stops and runs again after the restart
 	gradeCtx    context.Context
@@ -56,7 +60,7 @@ type Service struct {
 	wg          sync.WaitGroup
 }
 
-// New loads the saved pass and resumes a stage that was running when the process stopped.
+// New loads the saved pass, resuming interrupted work unless PauseOnLoad is enabled.
 func New(anki Anki, grader Grader, store Store, opts Options) (*Service, error) {
 	pass, err := store.Load()
 	if err != nil {
@@ -77,17 +81,28 @@ func New(anki Anki, grader Grader, store Store, opts Options) (*Service, error) 
 	switch pass.Stage() {
 	case domain.StageChecking:
 		if pass.GradeError == "" {
-			s.startGradingLocked()
+			if opts.PauseOnLoad {
+				s.paused = true
+			} else {
+				s.startGradingLocked()
+			}
 		}
 	case domain.StageConfirmed:
-		s.startWritingLocked()
+		if opts.PauseOnLoad {
+			s.paused = true
+		} else {
+			s.startWritingLocked()
+		}
 	}
 	return s, nil
 }
 
 // Close stops grading and waits for an Anki write in flight: a write is finished, never torn.
 func (s *Service) Close(ctx context.Context) error {
+	s.mu.Lock()
+	s.closed = true
 	s.cancelGrade()
+	s.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -121,18 +136,25 @@ func (s *Service) Cards() CardsView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireLocked()
-	return cardsView(s.pass, s.grading)
+	view := cardsView(s.pass, s.grading)
+	view.Paused = s.paused
+	return view
 }
 
-// Results returns the graded pass; ErrNotReady while grading, GradingFailedError after a failure.
+// Results returns graded results or a paused marker; ErrNotReady while grading, GradingFailedError after a failure.
 func (s *Service) Results() (ResultsView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireLocked()
 	switch s.pass.Stage() {
 	case domain.StageResults, domain.StageConfirmed, domain.StageWritten:
-		return resultsView(s.pass), nil
+		view := resultsView(s.pass)
+		view.Paused = s.paused
+		return view, nil
 	case domain.StageChecking:
+		if s.paused {
+			return ResultsView{Session: s.pass.Session, Paused: true, Items: []ResultItem{}}, nil
+		}
 		if !s.grading && s.pass.GradeError != "" {
 			return ResultsView{}, &GradingFailedError{Reason: s.pass.GradeError}
 		}
@@ -199,6 +221,35 @@ func (s *Service) SubmitAnswers(session string, answers map[int]string) error {
 	return err
 }
 
+// Resume explicitly restarts an interrupted pass without changing its answers or confirmed grades.
+func (s *Service) Resume(session string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return conflict(CodeBusy, "review service is closed")
+	}
+	s.expireLocked()
+	if err := s.checkSessionLocked(session); err != nil {
+		return err
+	}
+	switch s.pass.Stage() {
+	case domain.StageChecking:
+		if s.grading {
+			return nil
+		}
+		if s.pass.GradeError == "" {
+			s.startGradingLocked()
+			return nil
+		}
+	case domain.StageConfirmed:
+		if !s.applying {
+			s.startWritingLocked()
+		}
+		return nil
+	}
+	return conflict(CodeSent, "this batch has no interrupted operation")
+}
+
 // Regrade runs grading again after a failure.
 func (s *Service) Regrade(session string) error {
 	s.mu.Lock()
@@ -243,6 +294,7 @@ func (s *Service) Reset(session string) error {
 	}
 	s.opts.Log.Info().Str("session", s.pass.Session).Msg("pass dropped")
 	s.pass = nil
+	s.paused = false
 	return s.saveLocked()
 }
 
@@ -259,6 +311,7 @@ func (s *Service) expireLocked() {
 	}
 	s.opts.Log.Info().Str("session", s.pass.Session).Msg("pass expired")
 	s.pass = nil
+	s.paused = false
 	_ = s.saveLocked()
 }
 
@@ -343,6 +396,7 @@ func (s *Service) dueItems(ctx context.Context, deck string, limit int) ([]domai
 }
 
 func (s *Service) startGradingLocked() {
+	s.paused = false
 	p := s.pass
 	kind, items, answers := p.Kind, p.Answered(), p.AnswerMap()
 	// Rendered card content is for the browser only; grader ports receive plain text.
@@ -376,6 +430,7 @@ func (s *Service) startGradingLocked() {
 }
 
 func (s *Service) startWritingLocked() {
+	s.paused = false
 	p := s.pass
 	items, confirmed, deck := p.Items, slices.Clone(p.Confirmed), p.Deck
 	s.applying = true

@@ -59,6 +59,23 @@ if [[ -f "$script_dir/../go.mod" && -d "$script_dir/../cmd/anki-review-provision
   binary="$script_dir/../bin/anki-review-provisioner-linux-amd64"
 fi
 [[ -f $binary && ! -L $binary ]] || fail "build bin/anki-review-provisioner-linux-amd64 first"
+# Preflight the HTTP recovery key before group, broker or Docker mutations.
+source "$script_dir/provider.sh"
+env_file=/etc/anki-review/env
+[[ ! -L $env_file ]] || fail "refusing symlink environment file"
+session_key_file=/etc/anki-review/session.key
+session_key_configured=false
+if [[ -f $env_file ]] && grep -q '^[[:space:]]*SESSION_KEY_FILE[[:space:]]*=' "$env_file"; then
+  [[ $(grep -c '^[[:space:]]*SESSION_KEY_FILE[[:space:]]*=' "$env_file") == 1 ]] || fail "duplicate SESSION_KEY_FILE setting"
+  grep -q '^SESSION_KEY_FILE=' "$env_file" || fail "SESSION_KEY_FILE must use NAME=value syntax"
+  session_key_configured=true
+  session_key_file="$(provider_env_value "$env_file" SESSION_KEY_FILE)"
+  if [[ -n $session_key_file ]]; then
+    session_gid="$(getent group anki-review | cut -d: -f3)"
+    [[ -n $session_gid ]] || fail "configured session key service group is missing"
+    python3 -I "$script_dir/session-key.py" "${session_key_file%/*}" --file "$session_key_file" --uid 0 --gid "$session_gid" || fail "configured session key is missing or unsafe"
+  fi
+fi
 for tool in /usr/bin/docker /usr/bin/findmnt /usr/bin/mount /usr/bin/umount /usr/sbin/losetup /usr/sbin/blkid /usr/sbin/mkfs.ext4; do
   [[ -x $tool ]] || fail "required tool missing: $tool"
 done
@@ -72,6 +89,19 @@ image_gid=$("${probe[@]}" -g) || fail "cannot check pinned image GID"
 [[ $image_uid == "$anki_uid" && $image_gid == "$anki_gid" ]] || fail "pinned image UID/GID must match ANKI_UID/ANKI_GID"
 getent group anki-review >/dev/null || groupadd --system anki-review
 [[ $(getent group anki-review | cut -d: -f3) != 0 ]] || fail "broker group cannot be a root group alias"
+if [[ $session_key_configured == false ]]; then
+  python3 -I "$script_dir/session-key.py" /etc/anki-review --uid 0 --gid "$(getent group anki-review | cut -d: -f3)" --allow-create || fail "cannot provision session key"
+  # A broker-only install must not create an incomplete HTTP environment. The HTTP
+  # installer creates its normal defaults later and reuses the already provisioned key.
+  if [[ -f $env_file ]]; then
+    env_stage=$(mktemp /etc/anki-review/.env.XXXXXX)
+    cat "$env_file" >"$env_stage"
+    printf '\nSESSION_KEY_FILE=%s\n' "$session_key_file" >>"$env_stage"
+    chown root:anki-review "$env_stage"
+    chmod 0640 "$env_stage"
+    mv -f -- "$env_stage" "$env_file"
+  fi
+fi
 usermod -a -G anki-review "$http_user"
 
 for directory in /var/lib/anki-review-provisioner /run/anki-review-provisioner; do

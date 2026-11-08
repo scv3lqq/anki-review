@@ -83,7 +83,7 @@ func New(cfg config.Config, log zerolog.Logger) (*App, error) {
 			return nil, fmt.Errorf("app: owner metadata: %w", err)
 		}
 	}
-	factory := &accountFactory{cfg: cfg, log: log, broker: broker, runtimes: map[string]*App{"owner": a}}
+	factory := &accountFactory{cfg: cfg, log: log, broker: broker, registry: registry, runtimes: map[string]*App{"owner": a}}
 	manager, err := accounts.New(registry, factory, factory.runtime("owner", a), accounts.Options{MaxAccounts: cfg.MaxAccounts, RootUser: user})
 	if err != nil {
 		return nil, fmt.Errorf("app: accounts: %w", err)
@@ -103,7 +103,7 @@ func newAccount(cfg config.Config, log zerolog.Logger, opts httpapi.Options) (*A
 	if err != nil {
 		return nil, fmt.Errorf("app: %w", err)
 	}
-	vlt, err := vault.New(cfg.DataDir)
+	vlt, err := vault.New(cfg.DataDir, vault.WithSessionKey(cfg.SessionKeyFile, opts.AccountID))
 	if err != nil {
 		return nil, fmt.Errorf("app: %w", err)
 	}
@@ -147,6 +147,7 @@ func newAccount(cfg config.Config, log zerolog.Logger, opts httpapi.Options) (*A
 // key changed on the settings page applies at once.
 func (a *App) unlock(domain.Secrets) error {
 	svc, err := review.New(ankiconnect.New(a.cfg.AnkiURL, func() string { return a.owner.Secrets().AnkiKey }), a.grader, a.store, review.Options{
+		PauseOnLoad:    true,
 		KnowledgeDecks: a.cfg.KnowledgeDecks,
 		Sync:           a.cfg.AnkiSync,
 		Log:            a.log,

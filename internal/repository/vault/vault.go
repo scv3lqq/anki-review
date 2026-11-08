@@ -46,7 +46,7 @@ const (
 	maxThreads   = 16
 )
 
-// ErrDamaged means the file is not a vault this version can open. Deleting it starts setup over.
+// ErrDamaged means the vault cannot be opened. Preserve it and follow the documented recovery procedure.
 var ErrDamaged = errors.New("vault damaged")
 
 // ErrLocked means no successful Seal or Open has supplied a current encryption key.
@@ -69,10 +69,13 @@ func WithCost(time, memoryKiB uint32, threads uint8) Option {
 
 // Vault is the sealed file in a directory only the owner can read.
 type Vault struct {
-	path   string
-	cost   cost
-	mu     sync.Mutex
-	handle *unlockHandle
+	path           string
+	cost           cost
+	mu             sync.Mutex
+	handle         *unlockHandle
+	sessionKeyPath string
+	sessionKey     []byte
+	accountID      string
 }
 
 // New creates the directory if needed. The defaults are Argon2id t=3, m=64 MiB, p=4.
@@ -87,6 +90,9 @@ func New(dir string, opts ...Option) (*Vault, error) {
 	if err := checkCost(v.cost.time, v.cost.memoryKiB, v.cost.threads); err != nil {
 		return nil, fmt.Errorf("vault: %w", err)
 	}
+	if err := v.configureRecovery(dir); err != nil {
+		return nil, err
+	}
 	return v, nil
 }
 
@@ -100,11 +106,12 @@ type kdfParams struct {
 }
 
 type file struct {
-	Version int       `json:"version"`
-	User    string    `json:"user"`
-	KDF     kdfParams `json:"kdf"`
-	Nonce   string    `json:"nonce"`
-	Sealed  string    `json:"sealed"`
+	Version  int               `json:"version"`
+	User     string            `json:"user"`
+	KDF      kdfParams         `json:"kdf"`
+	Nonce    string            `json:"nonce"`
+	Sealed   string            `json:"sealed"`
+	Recovery *recoveryEnvelope `json:"recovery,omitempty"`
 }
 
 // Exists reports whether a vault file is there, whatever its content.
@@ -163,8 +170,16 @@ type unlockHandle struct {
 
 // Seal replaces the file with s sealed under a key from password. Every seal draws a new salt and nonce.
 func (v *Vault) Seal(user, password string, s domain.Secrets) error {
+	return v.SealSessions(user, password, s, nil)
+}
+
+// SealSessions replaces password encryption and its recovery envelope in one durable write.
+func (v *Vault) SealSessions(user, password string, s domain.Secrets, sessions []domain.AuthSession) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if err := validateSessions(user, sessions); err != nil {
+		return err
+	}
 	salt := make([]byte, saltSize)
 	if _, err := rand.Read(salt); err != nil {
 		return fmt.Errorf("vault: salt: %w", err)
@@ -175,7 +190,7 @@ func (v *Vault) Seal(user, password string, s domain.Secrets) error {
 		Name: kdfName, Time: v.cost.time, MemoryKiB: v.cost.memoryKiB, Threads: v.cost.threads,
 		Salt: base64.StdEncoding.EncodeToString(salt),
 	}}
-	if err := v.seal(s, handle); err != nil {
+	if err := v.seal(s, handle, sessions); err != nil {
 		return err
 	}
 	v.installHandle(handle)
@@ -189,10 +204,21 @@ func (v *Vault) Reseal(s domain.Secrets) error {
 	if v.handle == nil {
 		return ErrLocked
 	}
-	return v.seal(s, *v.handle)
+	var sessions []domain.AuthSession
+	if v.PersistenceEnabled() {
+		_, payload, err := v.loadRecovery()
+		if err != nil {
+			return err
+		}
+		if payload != nil {
+			defer clear(payload.Key)
+			sessions = payload.Sessions
+		}
+	}
+	return v.seal(s, *v.handle, sessions)
 }
 
-func (v *Vault) seal(s domain.Secrets, handle unlockHandle) error {
+func (v *Vault) seal(s domain.Secrets, handle unlockHandle, sessions []domain.AuthSession) error {
 	plain, err := json.Marshal(s)
 	if err != nil {
 		return fmt.Errorf("vault: encode: %w", err)
@@ -207,11 +233,18 @@ func (v *Vault) seal(s domain.Secrets, handle unlockHandle) error {
 		return fmt.Errorf("vault: nonce: %w", err)
 	}
 	sealed := aead.Seal(nil, nonce, plain, aad(handle.user))
-	raw, err := json.Marshal(file{
+	envelope := file{
 		Version: version, User: handle.user, KDF: handle.kdf,
 		Nonce:  base64.StdEncoding.EncodeToString(nonce),
 		Sealed: base64.StdEncoding.EncodeToString(sealed),
-	})
+	}
+	if v.PersistenceEnabled() {
+		envelope.Recovery, err = v.wrapRecovery(envelope, handle.key, sessions)
+		if err != nil {
+			return err
+		}
+	}
+	raw, err := json.Marshal(envelope)
 	if err != nil {
 		return fmt.Errorf("vault: encode file: %w", err)
 	}
@@ -223,7 +256,7 @@ func (v *Vault) seal(s domain.Secrets, handle unlockHandle) error {
 func (v *Vault) Open(user, password string) (domain.Secrets, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	raw, err := os.ReadFile(v.path)
+	raw, err := readRegular(v.path, maxMetadataBytes)
 	if err != nil {
 		return domain.Secrets{}, fmt.Errorf("vault: open: %w", err)
 	}
@@ -243,6 +276,13 @@ func (v *Vault) Open(user, password string) (domain.Secrets, error) {
 	defer clear(plain)
 	if !userOK || err != nil {
 		return domain.Secrets{}, domain.ErrCredentials
+	}
+	if v.PersistenceEnabled() && f.Recovery != nil {
+		payload, err := v.unwrapRecovery(f)
+		if err != nil {
+			return domain.Secrets{}, err
+		}
+		clear(payload.Key)
 	}
 	var s domain.Secrets
 	if err := json.Unmarshal(plain, &s); err != nil {
@@ -303,12 +343,12 @@ func parse(raw []byte) (file, []byte, []byte, []byte, error) {
 	return f, salt, nonce, sealed, nil
 }
 
-// damaged names the file (when known) and says how to recover.
+// damaged preserves the cause and optional path, directing recovery without deleting the vault.
 func damaged(path, reason string) error {
 	if path == "" {
-		return fmt.Errorf("%w: %s; delete the vault file to set up again", ErrDamaged, reason)
+		return fmt.Errorf("%w: %s; preserve the vault and follow the documented recovery procedure", ErrDamaged, reason)
 	}
-	return fmt.Errorf("%w: %s: %s; delete it to set up again", ErrDamaged, path, reason)
+	return fmt.Errorf("%w: %s: %s; preserve the vault and follow the documented recovery procedure", ErrDamaged, path, reason)
 }
 
 func checkCost(time, memoryKiB uint32, threads uint8) error {

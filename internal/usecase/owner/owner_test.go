@@ -450,7 +450,9 @@ func TestSessionExpiry(t *testing.T) {
 func TestLogout(t *testing.T) {
 	h := newHarness(t)
 	token := h.setup()
-	h.u.Logout(token)
+	if err := h.u.Logout(token); err != nil {
+		t.Fatal(err)
+	}
 	if h.u.Authorized(token) || h.u.Authorized("") {
 		t.Error("session survived logout")
 	}

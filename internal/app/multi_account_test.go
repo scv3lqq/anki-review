@@ -403,6 +403,12 @@ func TestMultiAccountRestartPrivacyAndOwnerAvailability(t *testing.T) {
 	}
 	a := separateClient(t, restarted.base)
 	a.post("/api/login", map[string]string{"user": "guest-a", "password": testPassword})
+	var paused review.CardsView
+	a.get("/api/cards", &paused)
+	if !paused.Paused {
+		t.Fatal("saved checking pass was not paused")
+	}
+	a.post("/api/resume", map[string]any{"session": paused.Session})
 	a.poll("/api/results", nil)
 	var cards review.CardsView
 	a.get("/api/cards", &cards)
@@ -418,6 +424,11 @@ func TestMultiAccountRestartPrivacyAndOwnerAvailability(t *testing.T) {
 	}
 	b := separateClient(t, restarted.base)
 	b.post("/api/login", map[string]string{"user": "guest-b", "password": testPassword})
+	b.get("/api/cards", &paused)
+	if !paused.Paused {
+		t.Fatal("saved confirmed pass was not paused")
+	}
+	b.post("/api/resume", map[string]any{"session": paused.Session})
 	b.poll("/api/status", nil)
 	if len(f.ankiB.Answered()) != 1 || len(f.ankiA.Answered()) != 0 {
 		t.Fatal("confirmed B pass did not resume only on B login")
