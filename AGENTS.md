@@ -58,10 +58,12 @@ on the setup page. Tokens do not belong in `.env`; never commit `.env`, collecti
 data, saved answer keys, or deployment secrets.
 
 Setup diagnostics must not submit API writes or press **Save to Anki**. Use the
-skill's helpers for Anki checks and secret transfer. A restarted server is locked;
-unlocking it can resume a saved pass, including grading or confirmed-grade writes.
-Follow the skill's saved-pass checks before restarting or asking the owner to
-unlock, and preserve its backup and sync-direction checks when moving collections.
+skill's helpers for Anki checks and secret transfer. Configured recovery preserves valid
+browser sessions after restart until their original expiry; existing accounts need one
+password login after enabling it. Login and recovery load saved passes passively;
+interrupted grading or confirmed writes require explicit Resume. Diagnostics never
+resume them. Follow the skill's saved-pass checks and preserve its key backup and
+sync-direction checks when moving collections.
 
 ## Native agent configuration
 

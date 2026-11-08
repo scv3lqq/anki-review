@@ -5,8 +5,11 @@ package owner
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +44,7 @@ const (
 	maxClaudeBytes   = 4096
 	maxAnkiKeyBytes  = 1024
 	claudeTokenStart = "sk-ant-"
+	maxAuthSessions  = 64
 )
 
 var (
@@ -78,6 +82,16 @@ type Vault interface {
 	Open(user, password string) (domain.Secrets, error)
 	Reseal(domain.Secrets) error
 	Close()
+}
+
+// PersistentVault optionally retains authenticated sessions alongside the encrypted vault key.
+type PersistentVault interface {
+	Vault
+	LoadSessions() ([]domain.AuthSession, error)
+	SaveSessions([]domain.AuthSession) error
+	Recover() (domain.Secrets, error)
+	SealSessions(user, password string, secrets domain.Secrets, sessions []domain.AuthSession) error
+	PersistenceEnabled() bool
 }
 
 // Checker proves a token works before it is sealed.
@@ -134,8 +148,7 @@ type session struct {
 	expires time.Time
 }
 
-// UseCase is the owner. Sessions live in memory only, so a restart logs everyone out and locks the
-// server until a login.
+// UseCase keeps credential access locked until a password or a recovered live session authenticates.
 type UseCase struct {
 	vault   Vault
 	checker Checker
@@ -176,7 +189,7 @@ func New(vault Vault, checker Checker, opts Options) (*UseCase, error) {
 	if opts.OnUnlock == nil {
 		opts.OnUnlock = func(domain.Secrets) error { return nil }
 	}
-	return &UseCase{
+	u := &UseCase{
 		vault:    vault,
 		checker:  checker,
 		opts:     opts,
@@ -184,7 +197,17 @@ func New(vault Vault, checker Checker, opts Options) (*UseCase, error) {
 		settings: newThrottle(opts.Now),
 		hasVault: exists,
 		sessions: map[string]session{},
-	}, nil
+	}
+	if persistent := u.persistence(); persistent != nil && exists {
+		records, err := persistent.LoadSessions()
+		if err != nil {
+			return nil, fmt.Errorf("owner: load sessions: %w", err)
+		}
+		if err := u.loadSessionsLocked(records); err != nil {
+			return nil, err
+		}
+	}
+	return u, nil
 }
 
 // RefreshVault discovers a file that a failed durable write may have left behind.
@@ -206,11 +229,14 @@ func (u *UseCase) RefreshVault() error {
 
 // Status tells the page where the owner stands for the session token.
 func (u *UseCase) Status(token string) Status {
+	u.pwMu.Lock()
+	defer u.pwMu.Unlock()
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if !u.hasVault {
 		return Status{State: StateSetup, GraderProvider: providerOrClaude(u.opts.DefaultProvider)}
 	}
+	s, authorized := u.authorizeLocked(token)
 	st := Status{State: StateLogin, Unlocked: u.unlocked}
 	if u.unlocked {
 		st.GraderProvider = providerOrClaude(u.secrets.GraderProvider)
@@ -219,7 +245,7 @@ func (u *UseCase) Status(token string) Status {
 			st.GraderConnected = !u.opts.RequireCredentials || u.secrets.ClaudeToken != ""
 		}
 	}
-	if s, ok := u.sessionLocked(token); ok {
+	if authorized {
 		st.State, st.User = StateReady, s.user
 	}
 	return st
@@ -227,17 +253,43 @@ func (u *UseCase) Status(token string) Status {
 
 // Authorized reports whether token is a live session.
 func (u *UseCase) Authorized(token string) bool {
+	u.pwMu.Lock()
+	defer u.pwMu.Unlock()
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	_, ok := u.sessionLocked(token)
+	_, ok := u.authorizeLocked(token)
 	return ok
 }
 
 // Logout ends the session.
-func (u *UseCase) Logout(token string) {
+func (u *UseCase) Logout(token string) error {
+	return u.RevokeHash(sessionHash(token))
+}
+
+// RevokeHash removes a session without requiring the manager to retain bearer credentials.
+func (u *UseCase) RevokeHash(hash string) error {
+	u.pwMu.Lock()
+	defer u.pwMu.Unlock()
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	delete(u.sessions, token)
+	if _, exists := u.sessions[hash]; !exists {
+		return nil
+	}
+	next := u.liveSessionsLocked()
+	delete(next, hash)
+	if err := u.saveSessionsLocked(next); err != nil {
+		return err
+	}
+	u.sessions = next
+	return nil
+}
+
+// SessionExpiry returns the original expiry without unlocking credentials or extending the TTL.
+func (u *UseCase) SessionExpiry(token string) (time.Time, bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	s, ok := u.sessionLocked(token)
+	return s.expires, ok
 }
 
 // Secrets returns the current tokens. Adapters call it on every use, so a settings change takes
@@ -308,8 +360,8 @@ func (u *UseCase) Setup(ctx context.Context, client string, in SetupInput) (stri
 		secrets.GraderProvider = provider
 	}
 	u.pwMu.Lock()
+	defer u.pwMu.Unlock()
 	err = u.vault.Seal(user, in.Password, secrets)
-	u.pwMu.Unlock()
 	if err != nil {
 		return "", fmt.Errorf("owner: setup: %w", err)
 	}
@@ -320,7 +372,10 @@ func (u *UseCase) Setup(ctx context.Context, client string, in SetupInput) (stri
 	if err := u.unlockLocked(secrets); err != nil {
 		return "", err
 	}
-	token := u.newSessionLocked(user)
+	token, err := u.newSessionLocked(user)
+	if err != nil {
+		return "", err
+	}
 	u.opts.Log.Info().Msg("owner set up")
 	return token, nil
 }
@@ -356,7 +411,7 @@ func (u *UseCase) Login(_ context.Context, client, user, password string) (strin
 	if err := u.unlockLocked(secrets); err != nil {
 		return "", err
 	}
-	return u.newSessionLocked(login), nil
+	return u.newSessionLocked(login)
 }
 
 // Update replaces the fields given and seals the result again. The fields are checked before the
@@ -477,22 +532,32 @@ func (u *UseCase) reseal(token, user, password string, next domain.Secrets, vers
 	u.pwMu.Lock()
 	defer u.pwMu.Unlock()
 	u.mu.Lock()
-	changed := u.version != version
-	u.mu.Unlock()
-	if changed {
+	defer u.mu.Unlock()
+	if _, ok := u.sessionLocked(token); !ok {
+		return domain.ErrCredentials
+	}
+	if u.version != version {
 		return ErrChanged
 	}
-	if err := u.vault.Seal(user, password, next); err != nil {
+	sessions := u.liveSessionsLocked()
+	if passwordChanged {
+		keep := sessionHash(token)
+		sessions = map[string]session{keep: sessions[keep]}
+	}
+	var err error
+	if persistent := u.persistence(); persistent != nil {
+		err = persistent.SealSessions(user, password, next, sessionRecords(sessions))
+	} else {
+		err = u.vault.Seal(user, password, next)
+	}
+	if err != nil {
+		u.reconcileSessionsLocked()
 		return fmt.Errorf("owner: update: %w", err)
 	}
 
-	u.mu.Lock()
-	defer u.mu.Unlock()
 	u.secrets = next
 	u.version++
-	if passwordChanged {
-		u.dropSessionsLocked(token)
-	}
+	u.sessions = sessions
 	u.opts.Log.Info().Msg("settings saved")
 	return nil
 }
@@ -565,6 +630,7 @@ func (u *UseCase) SaveCodexAuth(previous, next string) error {
 	merged := u.secrets
 	merged.CodexAuth = next
 	if err := u.vault.Reseal(merged); err != nil {
+		u.reconcileSessionsLocked()
 		return fmt.Errorf("owner: save Codex session: %w", err)
 	}
 	u.secrets = merged
@@ -607,7 +673,7 @@ func (u *UseCase) unlockLocked(s domain.Secrets) error {
 	if err := u.opts.OnUnlock(s); err != nil {
 		u.secrets = domain.Secrets{}
 		u.vault.Close()
-		u.opts.Log.Error().Err(err).Msg("unlock failed")
+		u.opts.Log.Error().Msg("unlock failed")
 		return fmt.Errorf("owner: unlock: %w: %w", ErrUnlock, err)
 	}
 	u.unlocked = true
@@ -615,16 +681,26 @@ func (u *UseCase) unlockLocked(s domain.Secrets) error {
 	return nil
 }
 
-func (u *UseCase) newSessionLocked(user string) string {
+func (u *UseCase) newSessionLocked(user string) (string, error) {
 	token := u.opts.NewToken()
-	now := u.opts.Now()
-	for t, s := range u.sessions {
-		if !now.Before(s.expires) {
-			delete(u.sessions, t)
-		}
+	hash := sessionHash(token)
+	if token == "" {
+		return "", errors.New("owner: empty session token")
 	}
-	u.sessions[token] = session{user: user, expires: now.Add(SessionTTL)}
-	return token
+	if _, exists := u.sessions[hash]; exists {
+		return "", errors.New("owner: duplicate session token")
+	}
+	next := u.liveSessionsLocked()
+	if len(next) >= maxAuthSessions {
+		ordered := sessionRecords(next)
+		delete(next, ordered[0].Hash)
+	}
+	next[hash] = session{user: user, expires: u.opts.Now().Add(SessionTTL)}
+	if err := u.saveSessionsLocked(next); err != nil {
+		return "", err
+	}
+	u.sessions = next
+	return token, nil
 }
 
 // sessionLocked returns the live session for token; an expired one is dropped.
@@ -632,23 +708,126 @@ func (u *UseCase) sessionLocked(token string) (session, bool) {
 	if token == "" {
 		return session{}, false
 	}
-	s, ok := u.sessions[token]
+	hash := sessionHash(token)
+	s, ok := u.sessions[hash]
 	if !ok {
 		return session{}, false
 	}
 	if !u.opts.Now().Before(s.expires) {
-		delete(u.sessions, token)
+		delete(u.sessions, hash)
 		return session{}, false
 	}
 	return s, true
 }
 
-// dropSessionsLocked keeps only the session token, which made the change.
-func (u *UseCase) dropSessionsLocked(keep string) {
-	for t := range u.sessions {
-		if t != keep {
-			delete(u.sessions, t)
+func sessionHash(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:])
+}
+
+func (u *UseCase) persistence() PersistentVault {
+	if persistent, ok := u.vault.(PersistentVault); ok && persistent.PersistenceEnabled() {
+		return persistent
+	}
+	return nil
+}
+
+func (u *UseCase) authorizeLocked(token string) (session, bool) {
+	s, ok := u.sessionLocked(token)
+	if !ok {
+		return session{}, false
+	}
+	if u.unlocked {
+		return s, true
+	}
+	persistent := u.persistence()
+	if persistent == nil {
+		return session{}, false
+	}
+	secrets, err := persistent.Recover()
+	if err != nil {
+		u.vault.Close()
+		u.opts.Log.Error().Msg("session recovery failed")
+		return session{}, false
+	}
+	if err := u.unlockLocked(secrets); err != nil {
+		return session{}, false
+	}
+	return s, true
+}
+
+func (u *UseCase) liveSessionsLocked() map[string]session {
+	next := make(map[string]session, len(u.sessions))
+	now := u.opts.Now()
+	for hash, s := range u.sessions {
+		if now.Before(s.expires) {
+			next[hash] = s
 		}
+	}
+	return next
+}
+
+func sessionRecords(sessions map[string]session) []domain.AuthSession {
+	records := make([]domain.AuthSession, 0, len(sessions))
+	for hash, s := range sessions {
+		records = append(records, domain.AuthSession{Hash: hash, User: s.user, Expires: s.expires})
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Expires.Equal(records[j].Expires) {
+			return records[i].Hash < records[j].Hash
+		}
+		return records[i].Expires.Before(records[j].Expires)
+	})
+	return records
+}
+
+func (u *UseCase) saveSessionsLocked(next map[string]session) error {
+	if persistent := u.persistence(); persistent != nil {
+		if err := persistent.SaveSessions(sessionRecords(next)); err != nil {
+			u.reconcileSessionsLocked()
+			return fmt.Errorf("owner: save sessions: %w", err)
+		}
+	}
+	return nil
+}
+
+func (u *UseCase) loadSessionsLocked(records []domain.AuthSession) error {
+	if len(records) > maxAuthSessions {
+		return errors.New("owner: invalid persisted sessions")
+	}
+	next := make(map[string]session, len(records))
+	for _, record := range records {
+		digest, err := hex.DecodeString(record.Hash)
+		if err != nil || len(digest) != sha256.Size || strings.ToLower(record.Hash) != record.Hash || record.User == "" || record.Expires.IsZero() {
+			return errors.New("owner: invalid persisted session")
+		}
+		if _, duplicate := next[record.Hash]; duplicate {
+			return errors.New("owner: duplicate persisted session")
+		}
+		if u.opts.Now().Before(record.Expires) {
+			next[record.Hash] = session{user: record.User, expires: record.Expires}
+		}
+	}
+	u.sessions = next
+	return nil
+}
+
+// A failed fsync can follow a successful rename. Authenticate disk state before trusting old sessions.
+func (u *UseCase) reconcileSessionsLocked() {
+	persistent := u.persistence()
+	if persistent == nil {
+		return
+	}
+	u.vault.Close()
+	u.unlocked = false
+	u.secrets = domain.Secrets{}
+	clear(u.sessions)
+	records, err := persistent.LoadSessions()
+	if err == nil {
+		err = u.loadSessionsLocked(records)
+	}
+	if err != nil {
+		u.opts.Log.Error().Msg("session persistence reconciliation failed")
 	}
 }
 

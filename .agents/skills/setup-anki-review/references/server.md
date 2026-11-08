@@ -65,7 +65,7 @@ through the authenticated page/SSH tunnel. Never read auth, user codes or CLI lo
 Delete only the named staging directories after successful save. Keep the dedicated session
 exclusive to this service. Refresh is resealed automatically; revoked refresh needs a new login.
 The macOS local staging file lives on disk until deleted; Linux call credentials require tmpfs.
-A restart leaves the app locked, and unlocking can resume a saved pass as described below.
+A configured recovery key preserves valid browser sessions across restart; login and recovery load saved passes passively until explicit Resume.
 
 ## Settings and access
 
@@ -108,13 +108,18 @@ A restart leaves the app locked, and unlocking can resume a saved pass as descri
 
 ## Pass in progress
 
-`S status` prints `api stage`. A restart (install.sh, `S restart`, `S sudo-restart`) can resume a
-saved pass only after the owner unlocks the server, so an `api stage` of a pass stage (anything
-other than `idle`, `written`, `unknown (locked)` or `none (no owner yet)`) or `no answer` from the
-host means: ask the user before a restart. A locked server resumes nothing on restart: no question.
-A host still on the binary from before the login (`owner: n/a (older binary without a login)`)
-reports its stage through the old `/api/cards`: the same rule applies. Its first restart onto the new
-binary leaves the service with no owner, and the pass resumes after the setup on the page.
+`S status` prints `api stage`; anonymous status cannot prove a saved pass is idle when locked.
+Before maintenance inspect saved passes privately using `check-passes.py` and preserve backups.
+Restart, login and recovery load current saved passes passively; checking/confirmed work requires
+the owner's explicit Resume. Diagnostics never unlock accounts or press Resume. Old binaries may
+resume automatically on login: inspect their saved passes before any login or upgrade.
+
+Installers provision `/etc/anki-review/session.key` only when no key setting exists. Preserve the
+remote configured path; do not forward a local `SESSION_KEY_FILE` path to a different host. Existing
+accounts need one password login after first enabling recovery. Inspect key metadata only, never
+bytes; back up the key separately and protect full host backups containing key plus data. Configured
+missing/unsafe keys and recovery with an empty key path fail closed. Follow the explicit offline
+lost-key/rotation migration in deploy/README.md; never regenerate keys or reset vaults as repair.
 
 ## Mode `server`
 
@@ -213,7 +218,10 @@ Every step is safe to rerun; on a rerun skip what is already there, as noted per
 ## Mode `server-update`
 
 Updating the binary needs no sudo prompt when the host has the polkit rule (install.sh from
-this kit, polkit 0.106+). The owner still logs in on the page after a restart, as in step 5.
+this kit, polkit 0.106+). Valid browser sessions recover with the configured server key after a
+restart until their original expiry; legacy mode or an expired session needs password login.
+Existing accounts need one password login after first enabling recovery. Step 5 verifies public
+status without requiring login, and interrupted checking/saving still waits for explicit Resume.
 
 `S status` shows `auto-deploy: on`: a signed commit pushed to `main` ships itself, so a commit plus
 `git push` is the update. This mode is then for a build that is not on `main`, or for what
@@ -244,7 +252,7 @@ waits on its own.
    Do not reset the owner's pass or unlock automatically to refresh saved HTML:
    existing saved HTML stays intact until the normal next pass. Follow the matching
    image/binary rollback procedure in deploy/README.md. For an audio-only desktop
-   refresh, start the matching HTTP binary, verify public status while locked and
+   refresh, start the matching HTTP binary, verify public status without cookies and
    finish here without a login request or `S wait-setup`. For an ordinary full setup
    change to `anki/`, use mode `server` and its existing `S up` semantics after these
    checks. `install.sh`, `smoke.sh`, `provider.sh`, `test-provider.sh` or unit changes
@@ -262,15 +270,13 @@ waits on its own.
    Afterwards suggest mode `server` once, which adds the rule (no polkit:
    `apt install polkitd` on
    the host first). An ssh error is not a refusal: fix access and rerun.
-5. The restart locks the service: `S status` shows `owner: locked (log in on the page)`. Unlock it:
-   - `DEPLOY_URL` unset: `S app-tunnel` in its own process session (the page is at
-     <http://127.0.0.1:8768/>). `DEPLOY_URL` set: the user uses that URL, no tunnel.
-   - Tell the user: "Log in on the page with your login and password. I won't see them. A pass in
-     progress resumes then." Run and poll `S wait-setup` in a process session (it prints
-     `owner: unlocked` once the login is done, 30 min at most).
-   - When it prints `owner: unlocked`: stop the owned app tunnel session, then `S status`
-     (`binary: matches`, `service: active`, `owner: unlocked`, `api stage: idle`), and `S verify-url`
-     when `DEPLOY_URL` is set.
+5. Verify `S status` reports `binary: matches` and `service: active`, then `S verify-url` when
+   `DEPLOY_URL` is set. Public status may still say locked before a valid browser session recovers;
+   do not require login or wait for public unlock as an update diagnostic. Existing sessions retain
+   their original expiry. First enablement needs one owner password login later on the normal page.
+   Tell the owner that interrupted checking/saving waits for their explicit Resume. If the owner
+   requests page access, start only the needed `S app-tunnel` when `DEPLOY_URL` is unset and stop
+   that owned tunnel after they finish. Never handle their password or trigger Resume.
 
 ## Switching to self-hosted
 
@@ -463,7 +469,7 @@ Use explicit dedicated credentials per account; never reuse host Claude login or
 Codex device snapshot. No setup/verification call should register a real account or
 import into the existing collection. Maintenance first stops HTTP, then inspects every
 saved account pass privately with check-passes.py. Keep backups and obtain the owner's
-decision about checking/confirmed states before any account is asked to unlock.
+decision about checking/confirmed states before any account presses Resume; login and recovery are passive.
 Root-only broker metadata, keys, quota backing filesystems and all guest app data
 are part of backup/restore; do not run broad resource cleanup.
 

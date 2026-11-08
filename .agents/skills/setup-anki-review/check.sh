@@ -181,6 +181,28 @@ else
   ok config "PORT, ANKI_CONNECT_URL, ANKI_SYNC, GRADE_TIMEOUT, LOG_LEVEL, GRADER_PROVIDER are valid"
 fi
 
+# Validate metadata only; this helper never prints or reads key material into diagnostics.
+session_key=$(trim "${SESSION_KEY_FILE:-}")
+if [ -n "$session_key" ]; then
+  if have_python && python3 -I "$root/deploy/session-key.py" "${session_key%/*}" --file "$session_key" --uid "$(id -u)" --gid "$(id -g)" >/dev/null 2>&1; then
+    ok recovery "server key metadata valid; valid browser sessions keep their original expiry after restart"
+  else
+    fail recovery "configured server key missing, unsafe or inaccessible; restore its protected backup, never regenerate as repair"
+  fi
+elif [ -f "$data_dir/vault.json" ] && have_python && python3 -I -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        vault = json.load(stream)
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if isinstance(vault, dict) and "recovery" in vault else 1)
+' "$data_dir/vault.json"; then
+  fail recovery "vault recovery exists but SESSION_KEY_FILE is empty; restore configuration or use explicit offline migration"
+else
+  info recovery "password-only mode: restart requires login; saved passes still await explicit Resume"
+fi
+
 need=$(awk '$1 == "go" { print $2; exit }' "$root/go.mod" 2>/dev/null)
 need=${need:-1.27}
 if command -v go >/dev/null 2>&1; then
@@ -348,11 +370,11 @@ if [ -f "$data_dir/state.json" ]; then
   stage=unknown
   if have_python; then stage=$(pass_stage "$data_dir/state.json"); fi
   case $stage in
-  confirmed) warn data "$data_dir holds a pass with confirmed grades: the server writes them to Anki on the first unlock (setup or login on the page)" ;;
-  checking) warn data "$data_dir holds a pass waiting for grading: the server runs the saved grading provider on it on the first unlock (setup or login on the page)" ;;
+  confirmed) warn data "$data_dir holds confirmed grades: passive after restart/login; only explicit Resume saving to Anki writes them" ;;
+  checking) warn data "$data_dir holds interrupted checking: passive after restart/login; only explicit Resume checking invokes the saved provider" ;;
   idle) info data "$data_dir exists, no saved pass" ;;
   unreadable) warn data "$data_dir/state.json is not a version 1 state file: the server refuses to start with it" ;;
-  unknown) warn data "$data_dir holds a saved pass, stage unknown without python3: confirmed grades in it go to Anki on the first unlock (setup or login on the page)" ;;
+  unknown) warn data "$data_dir holds a saved pass, stage unknown without python3: login/recovery is passive; diagnostics must not Resume" ;;
   *) info data "$data_dir holds a saved pass (stage $stage): nothing runs on it until the page acts" ;;
   esac
 elif [ -d "$data_dir" ]; then

@@ -51,6 +51,11 @@ func (s *stub) SubmitAnswers(session string, answers map[int]string) error {
 	return s.err
 }
 
+func (s *stub) Resume(session string) error {
+	s.session = session
+	return s.err
+}
+
 func (s *stub) Regrade(session string) error {
 	s.session = session
 	return s.err
@@ -101,7 +106,7 @@ func (f *fakeOwner) Login(_ context.Context, client, user, password string) (str
 	return f.token, f.err
 }
 
-func (f *fakeOwner) Logout(token string) { f.logout = token }
+func (f *fakeOwner) Logout(token string) error { f.logout = token; return f.err }
 
 func (f *fakeOwner) Update(_ context.Context, _ string, in owner.UpdateInput) error {
 	f.updated = in

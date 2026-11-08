@@ -12,7 +12,7 @@ const pad = (n) => String(n).padStart(2, "0");
 const initialState = () => ({
   session: null, cards: [], screen: "boot", view: "card", idx: 0,
   answers: {}, touched: {}, grades: {}, open: null,
-  results: null, locked: false, written: false, message: "", polling: null, more: 0, taking: false,
+  results: null, locked: false, written: false, message: "", polling: null, more: 0, taking: false, paused: false, resuming: false,
   decks: [], deck: null, starting: false, decksLoading: false, dueRefresh: null, gradeError: "",
   authed: false, settings: false, provider: "claude", graderConnected: false,
   accountId: null, isOwner: false, managed: false, multiAccount: false,
@@ -574,16 +574,28 @@ function renderChecking(note, bad = false) {
   const skipped = S.cards.length - done;
   const counts = [`${done} ${plural(done, "answer")}`];
   if (skipped) counts.push(`${skipped} skipped`);
-  $("check-title").textContent = S.gradeError ? "Check failed" : `${S.provider === "codex" ? "Codex" : "Claude"} is checking your answers`;
-  $("pulse").hidden = Boolean(S.gradeError);
+  $("check-title").textContent = S.paused ? "Checking paused" : S.gradeError ? "Check failed" : `${S.provider === "codex" ? "Codex" : "Claude"} is checking your answers`;
+  $("pulse").hidden = S.paused || Boolean(S.gradeError);
   $("retry").hidden = !S.gradeError;
+  $("resume-checking").hidden = !S.paused;
+  $("resume-checking").disabled = S.resuming;
   const sub = $("check-sub");
-  sub.textContent = note ?? `${counts.join(" · ")}. The page updates on its own…`;
+  sub.textContent = note ?? (S.paused ? "Your answers are saved. Resume when you are ready to continue checking." : `${counts.join(" · ")}. The page updates on its own…`);
   sub.classList.toggle("bad", bad);
+}
+
+function showPausedChecking() {
+  S.polling = null;
+  S.paused = true;
+  S.gradeError = "";
+  S.screen = "checking";
+  show();
+  renderChecking();
 }
 
 function showGradeError(reason) {
   S.polling = null;
+  S.paused = false;
   S.gradeError = reason;
   show();
   renderChecking(reason, true);
@@ -657,10 +669,43 @@ async function regrade() {
 
 $("retry").addEventListener("click", regrade);
 
+async function resumeReview() {
+  if (!S.paused || S.resuming) return;
+  const epoch = accountEpoch;
+  const checking = S.screen === "checking";
+  S.resuming = true;
+  S.message = "";
+  if (checking) renderChecking();
+  else renderResultsAvailability();
+  try {
+    const outcome = await post("api/resume", { session: S.session });
+    assertCurrent(epoch);
+    if (outcome === "session" || outcome === "sent") return location.reload();
+    S.paused = false;
+    if (checking) { renderChecking(); pollResults(); }
+    else { renderResultsAvailability(); pollStatus(); }
+  } catch (error) {
+    if (interrupted(epoch, error)) return;
+    if (checking) renderChecking(failure(error), true);
+    else { S.message = failure(error); renderResultsAvailability(); }
+  } finally {
+    if (currentAccount(epoch)) {
+      S.resuming = false;
+      $("resume-checking").disabled = false;
+      $("resume-saving").disabled = false;
+    }
+  }
+}
+
+$("resume-checking").addEventListener("click", resumeReview);
+$("resume-saving").addEventListener("click", resumeReview);
+
 // ---------- results ----------
 
 function showResults(data) {
+  if (data.paused && !data.confirmed) return showPausedChecking();
   S.polling = null;
+  S.paused = Boolean(data.paused);
   S.results = data.items;
   S.screen = "results";
   for (const item of S.results) {
@@ -676,7 +721,7 @@ function showResults(data) {
   save();
   show();
   renderResults();
-  if (S.locked && !S.written) pollStatus();
+  if (S.locked && !S.written && !S.paused) pollStatus();
 }
 
 function resultRow(item) {
@@ -740,9 +785,11 @@ function renderResultsAvailability(preserveCount = false) {
   const more = S.written && S.more > 0;
   hint.classList.toggle("bad", Boolean(S.message));
   $("done").hidden = !S.written;
-  $("write").hidden = S.written;
+  $("write").hidden = S.written || S.paused;
   $("write").disabled = S.locked;
   $("write").textContent = S.locked ? "Saving…" : "Save to Anki";
+  $("resume-saving").hidden = !S.paused || S.written;
+  $("resume-saving").disabled = S.resuming;
   $("res-wrap").classList.toggle("has-more", more);
   $("take").hidden = !more;
   $("to-decks").hidden = !S.written || more;
@@ -757,6 +804,7 @@ function renderResultsAvailability(preserveCount = false) {
   if (S.message) hint.textContent = S.message;
   else if (more) hint.textContent = `${S.more} more ${plural(S.more, "card")} in this deck, how many to take?`;
   else if (S.written) hint.textContent = "That's all for this deck today.";
+  else if (S.paused) hint.textContent = "Saving paused. Your confirmed grades are saved. Resume when you are ready to send them to Anki.";
   else hint.textContent = S.locked ? "Saving grades to Anki." : "Disagree with a grade? Change it, yours wins.";
 }
 
@@ -832,17 +880,25 @@ async function pollStatus() {
   const token = (S.polling = Symbol("status"));
   while (currentAccount(epoch) && S.polling === token) {
     try {
-      const res = await call("api/status", { cache: "no-store" });
+      const res = await call("api/results", { cache: "no-store" });
       if (res.status === 200) {
-        const status = await res.json();
+        const data = await res.json();
         assertCurrent(epoch);
         if (S.polling !== token) return;
+        if (data.paused) {
+          S.polling = null;
+          S.paused = true;
+          return renderResultsAvailability();
+        }
+        const status = data.status ?? {};
         S.message = status.message ?? "";
         S.more = status.more ?? 0;
         S.written = Boolean(status.written);
         // nothing was written: the grades unlock and Save to Anki can be pressed again
-        if (!S.written && status.retry) S.locked = false;
-        renderResults();
+        if (!S.written && status.retry) {
+          S.locked = false;
+          renderResults();
+        } else renderResultsAvailability();
         if (S.written || !S.locked) {
           S.polling = null;
           return save();
@@ -1313,6 +1369,7 @@ async function boot() {
   if (data.stage === "checking") {
     S.screen = "checking";
     if (data.gradeError) return showGradeError(data.gradeError);
+    if (data.paused) return showPausedChecking();
     show(); renderChecking(); return pollResults();
   }
   try {

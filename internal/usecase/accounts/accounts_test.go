@@ -104,6 +104,7 @@ func (*fakeChecker) CheckGrader(_ context.Context, _, credential string) (string
 
 type fakeFactory struct {
 	t                  *testing.T
+	now                func() time.Time
 	vaults             map[string]*fakeVault
 	checker            *fakeChecker
 	opens, removes     []string
@@ -128,7 +129,7 @@ func (f *fakeFactory) Open(_ context.Context, rec Record) (*Runtime, error) {
 		}
 		f.vaults[rec.ID] = v
 	}
-	auth, err := owner.New(v, f.checker, owner.Options{Log: zerolog.Nop(), OnUnlock: func(domain.Secrets) error { return f.unlockErr }})
+	auth, err := owner.New(v, f.checker, owner.Options{Log: zerolog.Nop(), Now: f.now, OnUnlock: func(domain.Secrets) error { return f.unlockErr }})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -419,12 +420,14 @@ type harness struct {
 func newHarness(t *testing.T, capacity int) *harness {
 	t.Helper()
 	f := &fakeFactory{t: t, vaults: make(map[string]*fakeVault), checker: &fakeChecker{}}
+	h := &harness{store: &memoryStore{}, factory: f, now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	f.now = func() time.Time { return h.now }
 	v := &fakeVault{}
-	auth, err := owner.New(v, f.checker, owner.Options{Log: zerolog.Nop()})
+	auth, err := owner.New(v, f.checker, owner.Options{Log: zerolog.Nop(), Now: f.now})
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &harness{store: &memoryStore{}, factory: f, root: &Runtime{Auth: auth}, now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	h.root = &Runtime{Auth: auth}
 	h.m, err = New(h.store, f, h.root, Options{MaxAccounts: capacity, Now: func() time.Time { return h.now }})
 	if err != nil {
 		t.Fatal(err)
@@ -747,6 +750,7 @@ func TestBoundedSessionsExpiryAndPasswordInvalidation(t *testing.T) {
 	first := h.token
 	var latest, previous string
 	for range 70 {
+		h.now = h.now.Add(time.Second)
 		previous = latest
 		var err error
 		latest, err = h.m.Login(context.Background(), "root", "root", password)
@@ -770,7 +774,7 @@ func TestBoundedSessionsExpiryAndPasswordInvalidation(t *testing.T) {
 	if _, _, ok := h.m.Resolve(previous); ok {
 		t.Fatal("password-invalidated session resolved")
 	}
-	if _, exists := h.m.sessions[previous]; exists {
+	if _, exists := h.m.sessions[invitationHash(previous)]; exists {
 		t.Fatal("invalid session index entry retained")
 	}
 	h.now = h.now.Add(owner.SessionTTL)

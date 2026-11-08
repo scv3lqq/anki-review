@@ -98,14 +98,13 @@ type runtimeSlot struct {
 }
 
 type sessionAccount struct {
-	id       string
-	expires  time.Time
-	sequence uint64
+	id      string
+	expires time.Time
 }
 
 type sessionEviction struct {
-	token string
-	auth  *owner.UseCase
+	hash string
+	auth *owner.UseCase
 }
 
 // Manager shares bounded authentication work while keeping each account isolated.
@@ -120,7 +119,6 @@ type Manager struct {
 	state        State
 	slots        map[string]*runtimeSlot
 	sessions     map[string]sessionAccount
-	sequence     uint64
 	closed       bool
 }
 
@@ -178,41 +176,68 @@ func New(store Store, factory Factory, root *Runtime, opts Options) (*Manager, e
 
 // Resolve accepts only a live session, never a caller-supplied account identifier.
 func (m *Manager) Resolve(token string) (Record, *Runtime, bool) {
-	if token == "" {
+	if token == "" || len(token) > 256 {
 		return Record{}, nil, false
 	}
+	hash := invitationHash(token)
 	m.mu.Lock()
-	session, exists := m.sessions[token]
-	var rec Record
-	var rt *Runtime
-	var expiredAuth *owner.UseCase
-	if exists && !m.closed && m.opts.Now().Before(session.expires) {
-		if i := recordIndex(m.state, session.id); i >= 0 && !m.state.Accounts[i].Pending {
-			rec = m.state.Accounts[i]
-			rt = m.slots[rec.ID].runtime
-		}
-	} else if exists {
-		if slot := m.slots[session.id]; slot != nil && slot.runtime != nil {
-			expiredAuth = slot.runtime.Auth
-		}
-		delete(m.sessions, token)
+	if m.closed {
+		m.mu.Unlock()
+		return Record{}, nil, false
 	}
-	m.mu.Unlock()
-	if expiredAuth != nil {
-		expiredAuth.Logout(token)
-	}
-	// The index prevents an unrelated account's slow OnUnlock from blocking this
-	// session, but the account remains the authority for logout and invalidation.
-	if rt != nil && rt.Auth.Authorized(token) {
-		return rec, rt, true
-	}
-	if exists {
-		m.mu.Lock()
-		if indexed, ok := m.sessions[token]; ok && indexed.id == session.id {
-			delete(m.sessions, token)
+	session, exists := m.sessions[hash]
+	if exists && !m.opts.Now().Before(session.expires) {
+		delete(m.sessions, hash)
+		slot := m.slots[session.id]
+		var auth *owner.UseCase
+		if slot != nil && slot.runtime != nil {
+			auth = slot.runtime.Auth
 		}
 		m.mu.Unlock()
+		if auth != nil {
+			_ = auth.RevokeHash(hash)
+		}
+		return Record{}, nil, false
 	}
+	m.mu.Unlock()
+	id := session.id
+	if !exists {
+		resolver, ok := m.factory.(interface{ ResolveSession(string) (string, bool) })
+		if !ok {
+			return Record{}, nil, false
+		}
+		var matched bool
+		id, matched = resolver.ResolveSession(token)
+		if !matched {
+			return Record{}, nil, false
+		}
+	}
+	m.mu.Lock()
+	i := recordIndex(m.state, id)
+	if m.closed || i < 0 || m.state.Accounts[i].Pending {
+		m.mu.Unlock()
+		return Record{}, nil, false
+	}
+	rec := m.state.Accounts[i]
+	m.mu.Unlock()
+	rt, err := m.open(context.Background(), rec)
+	if err == nil && rt.Auth.Authorized(token) {
+		expires, live := rt.Auth.SessionExpiry(token)
+		if live && m.opts.Now().Before(expires) {
+			m.mu.Lock()
+			if !m.closed {
+				if !exists {
+					m.sessions[hash] = sessionAccount{id: id, expires: expires}
+				}
+				m.mu.Unlock()
+				return rec, rt, true
+			}
+			m.mu.Unlock()
+		}
+	}
+	m.mu.Lock()
+	delete(m.sessions, hash)
+	m.mu.Unlock()
 	return Record{}, nil, false
 }
 
@@ -463,23 +488,30 @@ func (m *Manager) open(ctx context.Context, rec Record) (*Runtime, error) {
 }
 
 func (m *Manager) complete(id string, rt *Runtime, token string) (string, error) {
-	evicted, err := m.commitSession(id, token)
+	expires, live := rt.Auth.SessionExpiry(token)
+	if !live {
+		return "", ErrUnavailable
+	}
+	evicted, err := m.commitSession(id, token, expires)
 	for _, session := range evicted {
-		session.auth.Logout(session.token)
+		if revokeErr := session.auth.RevokeHash(session.hash); revokeErr != nil {
+			err = errors.Join(err, ErrUnavailable)
+		}
 	}
 	if err != nil {
-		rt.Auth.Logout(token)
+		_ = rt.Auth.Logout(token)
 		return "", err
 	}
 	return token, nil
 }
 
-func (m *Manager) commitSession(id, token string) ([]sessionEviction, error) {
+func (m *Manager) commitSession(id, token string, expires time.Time) ([]sessionEviction, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
 		return nil, ErrUnavailable
 	}
+	hash := invitationHash(token)
 	next := copyState(m.state)
 	i := recordIndex(next, id)
 	if i < 0 {
@@ -496,13 +528,13 @@ func (m *Manager) commitSession(id, token string) ([]sessionEviction, error) {
 			return nil, err
 		}
 	}
-	if previous, ok := m.sessions[token]; ok && previous.id != id {
+	if previous, ok := m.sessions[hash]; ok && previous.id != id {
 		return nil, ErrUnavailable
 	}
 	now := m.opts.Now()
 	var evicted []sessionEviction
 	count, oldest := 0, ""
-	var oldestSequence uint64
+	var oldestExpiry time.Time
 	for saved, session := range m.sessions {
 		if !now.Before(session.expires) {
 			if slot := m.slots[session.id]; slot != nil && slot.runtime != nil {
@@ -511,10 +543,10 @@ func (m *Manager) commitSession(id, token string) ([]sessionEviction, error) {
 			delete(m.sessions, saved)
 			continue
 		}
-		if session.id == id && saved != token {
+		if session.id == id && saved != hash {
 			count++
-			if oldest == "" || session.sequence < oldestSequence {
-				oldest, oldestSequence = saved, session.sequence
+			if oldest == "" || session.expires.Before(oldestExpiry) || (session.expires.Equal(oldestExpiry) && saved < oldest) {
+				oldest, oldestExpiry = saved, session.expires
 			}
 		}
 	}
@@ -522,8 +554,7 @@ func (m *Manager) commitSession(id, token string) ([]sessionEviction, error) {
 		evicted = append(evicted, sessionEviction{oldest, m.slots[id].runtime.Auth})
 		delete(m.sessions, oldest)
 	}
-	m.sequence++
-	m.sessions[token] = sessionAccount{id: id, expires: now.Add(owner.SessionTTL), sequence: m.sequence}
+	m.sessions[hash] = sessionAccount{id: id, expires: expires}
 	return evicted, nil
 }
 

@@ -189,3 +189,110 @@ workflow after changes.
 No owner/password credential retrieval; no live grading, Anki writes, collection movement or sync
 configuration changes; no new provider defaults; no transparent key regeneration; no session TTL
 extension; no unrelated Claude instruction changes; no automatic key rotation.
+
+## Design clarifications before source
+- T3: Resume on nonresumable stage returns CodeSent, `this batch has no interrupted operation`.
+  Checking with existing GradeError is not paused; Regrade remains its explicit retry action.
+  Paused checking Results returns success with Session, Paused=true and empty Items, no answer keys;
+  browser handles paused before showResults. Confirmed returns normal results plus Paused=true.
+  Resume calls expireLocked before session validation, keeps existing passTTL boundary, and after
+  Close rejects CodeBusy `review service is closed`.
+- T6 ownership also includes `.agents/skills/setup-anki-review/server.sh` for key path forwarding
+  and recovery-aware status/wait guidance. Keep independent Claude sources unchanged.
+- Baseline evidence: make check passed (49 web tests plus Go/race/lint/deploy); make build passed.
+- T6 dry-run corrections: add `.agents/skills/setup-anki-review/check.sh`, new
+  `deploy/session-key.py` and synthetic `deploy/test-session-key.py` to ownership. Share one
+  provisioning helper across installers and include it in server.sh kit_top/kit_all. Autodeploy
+  already compares all tracked deploy files and needs no special manifest change.
+- Key helper: ensure_key(directory,uid,gid,allow_create) checks protected ancestors, uses private
+  temporary file plus no-overwrite link publication, validates regular non-symlink, 32-byte size,
+  owner/group/mode and races. Never chmod/chown an unsafe existing key. Installers allow first
+  creation only when no SESSION_KEY_FILE was previously configured. Configured missing/unsafe key
+  refuses before installer mutations. Fixtures run with temporary directories/current IDs and
+  cover missing configured key, unsafe parents/symlinks, no overwrite, publication race and no
+  secret output. `make check-deploy` must run the new offline fixture.
+- T6 may edit Makefile only to add that fixture command. Diagnostics inspect key metadata without
+  displaying bytes. Update stale automatic-resume text in check.sh and all owned setup files.
+- T6 compatibility correction: the independent legacy `.claude/skills/setup-anki-review/server.sh`
+  also transports the deploy kit. Permit only its kit_top/kit_all manifest additions for the shared
+  key helper; do not rewrite its instructions or migrate its configuration. Its existing fixture
+  upload test must pass. This narrow transport dependency overrides the earlier no-edit statement.
+- T5: saving polling reads api/results (status plus paused) instead of api/status so open tabs detect
+  a paused write after restart. It does not rebuild rows or grades on every tick. This accepts one
+  bounded results payload per existing polling interval without adding domain status fields.
+- T2 fail-closed clarification: if a vault contains recovery but SESSION_KEY_FILE is unset, refuse
+  persistence/account construction rather than permit legacy-mode revocations to resurrect when
+  recovery is re-enabled. Pre-recovery vaults remain usable in legacy mode. Canonicalize trusted
+  parent aliases (macOS /tmp and /var) before containment/protected-ancestor checks; key itself may
+  never be a symlink. Document disabling via explicit password-authorized recovery migration.
+- T4 ownership includes existing `internal/app/multi_account_test.go`: replace automatic post-login
+  grading/write expectations with passive expectations followed by explicit /api/resume actions.
+  Factory keeps registry Store reference and reloads registered nonpending records for bounded
+  lookup; reject empty or over-256-byte bearer candidates before disk work.
+- T4 existing accounts_test harness/fakeFactory owner.Options.Now uses manager's shared fake clock;
+  retain original expiry assertions. This adapts the old independently computed expiry seam.
+- Reviewer mutation gates (isolated copies, build first): T1/T2 `go vet ./internal/repository/vault
+  ./internal/usecase/owner` then `go test ./internal/repository/vault ./internal/usecase/owner`;
+  T3 `go vet ./internal/usecase/review` then `go test ./internal/usecase/review -run 'Paused|Resume'`;
+  T4 `go vet ./internal/config ./internal/app ./internal/usecase/accounts ./internal/handler/httpapi`
+  then `go test ./internal/config ./internal/app ./internal/usecase/accounts ./internal/handler/httpapi`;
+  T5 `node --check web/app.js` then `node --test web/app_test.cjs`.
+- T6 server-path correction: do not forward local SESSION_KEY_FILE through S install (a local path
+  is not valid on the host). Remote installers preserve saved server path or choose their protected
+  default only at first enable; local lib.sh loads the local path for diagnostics only.
+
+## Iteration 1: review corrections
+### T4-F1: align cache eviction and prove original expiry
+Own `internal/usecase/accounts/accounts.go`, `persistent_test.go`, original T4 implementer.
+Independent reviewer reproduced reverse-order restoration of 64 sessions causing manager's cache
+sequence eviction to additionally revoke the newest session after owner evicted oldest expiry.
+Change manager eviction to ascending original expiry, then ascending hash, identical to owner
+sessionRecords order. Remove unused sequence fields/counter. Keep bounded cache/durable RevokeHash.
+Add the reverse-restoration regression first, archive RED, and assert exact cache expiry after
+fallback in the existing persistence test. The now-plus-TTL mutation must fail that assertion.
+Gates: `go test -race ./internal/usecase/accounts`, `golangci-lint run ./internal/usecase/accounts/...`.
+Fresh independent review must bind new hashes; previous source verdict cannot be reused.
+
+### T2-F1: always publish a live fresh session
+Own `internal/usecase/owner/owner.go`, `persistent_test.go`, original T2 implementer.
+Reviewer verified same-clock/smallest-incoming-hash and backwards-clock cases: at capacity the
+new session was inserted before eviction and could evict itself while Login returned success.
+Evict the oldest existing live record before inserting incoming, preserving original expiry/hash
+ordering for existing candidates. Always return a durable live fresh session, even after a clock
+rollback. Add both deterministic regressions first and archive RED. Gates:
+`go test -race ./internal/usecase/owner`, `golangci-lint run ./internal/usecase/owner/...`.
+
+## Release validation order
+Implementation acceptance covers criteria 1-5 and all review fixes, with independent full Gates.
+Criteria 6-7 are subsequent release completion checks: execute commit/push/merge/CI and authorized
+live maintenance after implementation PASS, then pass their command evidence to the same validator
+for final completion audit. They must not be marked MET before those actions actually complete.
+This avoids making a safe pre-release verdict depend on an already completed deployment.
+
+## Operational maintenance contract
+The private, independently reviewed maintenance script intentionally handles zero guest
+reservations only. It checks zero reservations/managed containers/guest registry again after
+stopping HTTP and broker, preserves all app state and the existing owner collection, creates and
+verifies a streamed encrypted backup with an independent protected random backup key, then
+installs both binaries and enables the protected session key. Any guest state aborts before
+backup/install and requires the full filesystem maintenance procedure. Preserve the old kit
+before upload. Rollback restores old kit, installed and staged binaries and saved settings, then
+verifies both services. It retains saved data and never restores collections automatically.
+Only anonymous session GET is used, no login/Resume/grading/write probe. Source fingerprints
+prove unchanged app JSON, not independently absence of external calls. Sudo requires a visible
+terminal interaction; operator never sees password bytes.
+
+### T6-F1: remove stale operational protection/login prose
+Own existing deployment README and server reference plus their canonical splice artifacts.
+Replace remaining password-only backup protection and unconditional repeat-login claims with the
+actual key+data model and cookie restoration. Explain explicit offline recovery metadata removal
+preserving password ciphertext; never delete vault as a missing-key repair. Fresh splice checks
+and workflow review bind updated hashes.
+
+### T6-F2: preserve isolated binary-layout fixture
+Own `internal/provisioner/deployment_test.go` minimal extraction boundary adaptation.
+Full `make check` exposed that the fixture extracts binary selection through `for tool in`, now
+also including unrelated new session-key preflight. End extraction at the explicit preflight
+marker and verify it exists, retaining all expected source/kit/missing binary assertions.
+Gates: `go test -race ./internal/provisioner -run TestInstallerBinaryLayouts`,
+`golangci-lint run ./internal/provisioner/...`. Independent reviewer verifies unchanged assertions.

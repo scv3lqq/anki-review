@@ -109,9 +109,11 @@ and copy the value of `apiKey`. If it is `null`, leave the field empty. On a ser
 
 Setup checks the AnkiConnect key first (Anki must be running), then makes one tiny call to the
 selected grader (a little of that provider's quota). Only then it seals the credentials and provider
-choice in `DATA_DIR/vault.json` and logs you in. After a
-restart the page shows **Log in**: until you log in, the server is locked and grading waits. Once
-logged in, **Settings** changes the password, grading provider or credentials; omitted credentials keep their current value.
+choice in `DATA_DIR/vault.json` and logs you in. With `SESSION_KEY_FILE` configured, existing
+browser sessions survive a restart until their original 30-day expiry. Existing accounts need
+one successful password login after enabling this feature. Without recovery configured, log in
+after restarting. Interrupted checking or saving always waits for an explicit **Resume** click.
+Once logged in, **Settings** changes the password, grading provider or credentials; omitted credentials keep their current value.
 For Codex, import a new `auth.json` to reauthenticate. Follow the exact
 [device login, secure import and cleanup steps](deploy/README.md#codex-device-session).
 
@@ -139,7 +141,8 @@ Anki there syncs through AnkiWeb or through Anki's own sync server on the same h
 - If Anki refuses the answers because a deck's study screen is open, go back to Anki's deck list and
   press **Save to Anki** again.
 - A pass left unfinished for 12 hours is dropped on the next visit.
-- The server keeps the current pass in `DATA_DIR`: a restart resumes it, grading or writing included.
+- The server keeps the current pass in `DATA_DIR`; a restart loads it passively. Click **Resume checking**
+  or **Resume saving to Anki** to continue interrupted work.
 
 ## Configuration
 
@@ -150,6 +153,7 @@ Environment variables, all optional. To keep them in a file, `cp .env.example .e
 | --- | --- | --- |
 | `PORT` | `8767` | Port on 127.0.0.1 |
 | `DATA_DIR` | `./data` | State of the current pass (it holds the answer keys) and `vault.json` (the sealed tokens). The directory is `0700`, the files `0600` |
+| `SESSION_KEY_FILE` | empty | Absolute path to an independent 32-byte server recovery key outside the repository and `DATA_DIR`. Empty supports password-only vaults until recovery is enabled; see [key maintenance](deploy/README.md#persistent-browser-sessions) |
 | `KNOWLEDGE_DECKS` | `Tech,Career` | Top-level decks graded by meaning, comma-separated |
 | `ANKI_CONNECT_URL` | `http://127.0.0.1:8765` | AnkiConnect endpoint |
 | `ANKI_SYNC` | `true` | Sync Anki with its sync server (AnkiWeb or self-hosted) before a pass and after writing grades |
@@ -181,23 +185,26 @@ multi-account mode anonymous session status exposes no account's review progress
   to 15 minutes. The client is the last `X-Forwarded-For` hop (the one your proxy adds), else
   `X-Real-IP`, else the connection's address. Settings keep their own count, so strangers failing to
   log in can't lock a logged-in owner out of them.
-- **Sessions.** A random cookie: `HttpOnly`, `SameSite=Strict`, 30 days, kept in memory only, so a
-  restart logs everyone out. The cookie is `Secure` when the proxy sends `X-Forwarded-Proto: https`.
-  Changing the password logs out the other sessions.
+- **Sessions.** A random cookie: `HttpOnly`, `SameSite=Strict`, original 30-day expiry. Only hashes
+  are stored server-side. With a configured recovery key, sessions survive restart without renewal.
+  Logout revokes the current session durably; changing the password revokes other sessions and
+  retains the initiating session's expiry. The cookie is `Secure` when the proxy sends `X-Forwarded-Proto: https`.
 - **Sealed credentials.** The selected provider, Claude token, Codex session and AnkiConnect key live in `DATA_DIR/vault.json`, encrypted
   with XChaCha20-Poly1305 under a key from Argon2id (3 passes, 64 MiB) of the owner's password. Password saves use a fresh salt and nonce; OAuth refresh retains the current KDF metadata
   and uses a fresh nonce. The file is replaced atomically.
-- **Locked after a restart.** Credentials are decrypted only after owner login; Codex call files
-  are temporary, with the filesystem boundary described below. Until then nothing that needs Anki or a grader runs.
-- **What it protects.** The tokens stay unreadable on a copy of the disk, in a backup or snapshot, in
-  an env file, and for other users of the machine. A stolen `vault.json` costs one Argon2id run per
-  password guess.
+- **Recovery after a restart.** A valid browser session can lazily recover credentials with the
+  server key. Anonymous requests cannot unlock accounts. Saved passes load passively even after
+  login or recovery; interrupted grading and confirmed writes require explicit **Resume**.
+- **What it protects.** A data-only backup without the independent server key retains password
+  protection. A stolen `vault.json` without that key costs one Argon2id run per password guess.
+  Application data plus the server key decrypts credentials without the password. Protect full
+  host backups that contain both with equivalent access controls and encryption.
 - **What it does not protect.** Root, or the service user, on the machine that runs the server can read
   the server's memory while it is unlocked, and so the tokens. On a deploy-kit server the AnkiConnect
   key also sits in `anki/secrets/` for the Anki container, so the vault mainly guards the grading credentials.
-- **Forgotten password.** There is no recovery. Stop the server, delete `DATA_DIR/vault.json`, start it
-  and set up again with grading credentials and the AnkiConnect key. On a server: `sudo rm /var/lib/anki-review/data/vault.json`, then
-  `systemctl restart anki-review` (the restart drops the tokens still in memory).
+- **Forgotten password or lost server key.** There is no password-reset flow. Never delete a vault
+  to repair a missing server key. Restore its protected key backup or follow the explicit offline
+  [recovery migration](deploy/README.md#persistent-browser-sessions), then enter the existing password on the page.
 - Requests with any `Host` other than `127.0.0.1` or `localhost` are refused, so a foreign site can't
   reach it through DNS rebinding. A reverse proxy in front must send `Host: 127.0.0.1:<port>`, and
   should send `X-Forwarded-Proto` and `X-Forwarded-For`: without them the cookie isn't `Secure` and all

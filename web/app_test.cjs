@@ -91,12 +91,16 @@ test("invitation bearer stays in a fragment", () => {
 });
 
 class Element {
-  constructor(tag = "div") { this.tagName = tag; this.value = ""; this.files = []; this.hidden = false; this.disabled = false; this.dataset = {}; this.children = []; this.attributes = {}; this.textContent = ""; this.classList = { toggle() {} }; this.style = { setProperty() {} }; }
+  constructor(tag = "div") { this.tagName = tag; this.value = ""; this.files = []; this.hidden = false; this.disabled = false; this.dataset = {}; this.children = []; this.attributes = {}; this.listeners = new Map(); this.textContent = ""; this.classList = { toggle() {} }; this.style = { setProperty() {} }; }
   set value(value) { this._value = value; if (value === "") this.files = []; }
   get value() { return this._value; }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   getAttribute(name) { return this.attributes[name] ?? null; }
-  addEventListener() {}
+  addEventListener(type, listener) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(listener);
+  }
+  async dispatch(type) { for (const listener of this.listeners.get(type) ?? []) await listener({ type }); }
   append(...items) { this.children.push(...items); }
   replaceChildren(...items) { this.children = items; }
   querySelectorAll() { return []; }
@@ -109,7 +113,11 @@ const flushPage = () => new Promise((resolve) => setImmediate(resolve));
 
 function pageHarness(fetch, hash = "") {
   const nodes = new Map();
-  for (const match of fs.readFileSync(`${__dirname}/index.html`, "utf8").matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"/g)) nodes.set(match[2], new Element(match[1]));
+  for (const match of fs.readFileSync(`${__dirname}/index.html`, "utf8").matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"[^>]*>([^<]*)/g)) {
+    const node = new Element(match[1]);
+    node.textContent = match[3];
+    nodes.set(match[2], node);
+  }
   const get = (id) => { assert.ok(nodes.has(id), `missing page element ${id}`); return nodes.get(id); };
   let reloads = 0;
   const location = { href: `https://review.example/${hash}`, hash, reload() { reloads++; } };
@@ -614,4 +622,187 @@ test("account reset clears pending due refresh and initial deck loading", () => 
   page.api.resetAccount();
   assert.equal(page.api.S.dueRefresh, null);
   assert.equal(page.api.S.decksLoading, false);
+});
+
+
+const interruptedResult = (paused = true) => ({
+  session: "saved-pass", paused,
+  items: [{ n: 1, question: "Question", answer: "saved answer", back: "Key", grade: "Good" }],
+  confirmed: { 1: "Hard" }, status: { written: false, more: 0 },
+});
+
+function pausedPage(stage, fetch) {
+  const requests = [];
+  const page = pageHarness(async (path, init = {}) => {
+    requests.push({ path, init });
+    if (path === "api/session") return response({ ...account("owner"), state: "ready" });
+    if (path === "api/cards") return response({ session: "saved-pass", deck: "Tech", stage, paused: true, cards: [{ n: 1, question: "Question" }], answers: [{ n: 1, answer: "saved answer" }], due: 1 });
+    return fetch(path, init);
+  });
+  return { page, requests };
+}
+
+for (const stage of ["checking", "confirmed"]) {
+  test(`paused ${stage} boot waits for an explicit Resume click and preserves saved data`, async (t) => {
+    let resumed = false;
+    const { page, requests } = pausedPage(stage, async (path) => {
+      if (path === "api/resume") { resumed = true; return response({}); }
+      assert.equal(path, "api/results");
+      return response(stage === "checking" ? { session: "saved-pass", items: [{ n: 1, question: "Question", answer: "saved answer", back: "Key", grade: "Good" }] } : { ...interruptedResult(!resumed), status: { written: resumed } });
+    });
+    t.after(() => page.api.resetAccount());
+    await page.api.boot();
+    assert.equal(requests.filter((req) => req.init.method === "POST").length, 0);
+    assert.equal(page.api.S.polling, null);
+    assert.equal(page.api.S.answers[1], "saved answer");
+    const action = page.get(stage === "checking" ? "resume-checking" : "resume-saving");
+    assert.equal(action.hidden, false);
+    assert.equal(action.textContent, stage === "checking" ? "Resume checking" : "Resume saving to Anki");
+    if (stage === "checking") {
+      assert.equal(page.get("pulse").hidden, true);
+      assert.equal(page.api.S.results, null, "checking pause never renders empty results or answer keys");
+    } else {
+      assert.equal(page.api.S.grades[1], "Hard");
+      assert.equal(page.api.S.results[0].back, "Key");
+      assert.equal(page.get("write").hidden, true);
+    }
+    await action.dispatch("click");
+    await flushPage();
+    const resumes = requests.filter((req) => req.path === "api/resume");
+    assert.equal(resumes.length, 1);
+    assert.equal(resumes[0].init.method, "POST");
+    assert.deepEqual(JSON.parse(resumes[0].init.body), { session: "saved-pass" });
+    assert.equal(page.api.S.screen, "results");
+    assert.equal(page.api.S.paused, false);
+    assert.equal(page.api.S.polling, null);
+    assert.equal(page.api.S.answers[1], "saved answer");
+    if (stage === "confirmed") assert.equal(page.api.S.written, true);
+  });
+}
+
+test("an open checking tab stops polling on a paused response without rendering answer keys", async (t) => {
+  const requests = [];
+  const page = pageHarness(async (path, init = {}) => {
+    requests.push({ path, init });
+    return response({ session: "saved-pass", paused: true, items: [] });
+  });
+  t.after(() => page.api.resetAccount());
+  readyStart(page);
+  Object.assign(page.api.S, { screen: "checking", session: "saved-pass", answers: { 1: "typed answer" } });
+  await page.api.pollResults();
+  assert.equal(page.api.S.screen, "checking");
+  assert.equal(page.api.S.results, null);
+  assert.equal(page.api.S.polling, null);
+  assert.equal(page.get("resume-checking").hidden, false);
+  assert.equal(page.get("pulse").hidden, true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].init.method, undefined);
+  assert.equal(page.api.S.answers[1], "typed answer");
+});
+
+test("an open saving tab detects paused results and offers Resume without changing confirmed grades", async (t) => {
+  const requests = [];
+  const page = pageHarness(async (path, init = {}) => {
+    requests.push({ path, init });
+    return response(path === "api/results" ? interruptedResult() : { written: true });
+  });
+  t.after(() => page.api.resetAccount());
+  readyStart(page);
+  page.api.S.session = "saved-pass";
+  page.api.showResults(interruptedResult(false));
+  await flushPage();
+  assert.equal(page.api.S.paused, true);
+  assert.equal(page.api.S.polling, null);
+  assert.equal(page.api.S.written, false);
+  assert.equal(page.api.S.grades[1], "Hard");
+  assert.equal(page.get("resume-saving").hidden, false);
+  assert.equal(page.get("write").hidden, true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "api/results");
+  assert.equal(requests[0].init.method, undefined);
+});
+
+for (const stage of ["checking", "confirmed"]) {
+  test(`paused ${stage} Resume fences duplicate clicks and delayed completions after an account change`, async (t) => {
+    const completion = deferred();
+    const { page, requests } = pausedPage(stage, async (path) => path === "api/resume" ? completion.promise : response(interruptedResult()));
+    t.after(() => page.api.resetAccount());
+    await page.api.boot();
+    const action = page.get(stage === "checking" ? "resume-checking" : "resume-saving");
+    const pending = action.dispatch("click");
+    await flushPage();
+    assert.equal(action.disabled, true);
+    await action.dispatch("click");
+    assert.equal(requests.filter((req) => req.path === "api/resume").length, 1);
+    page.api.selectAccount(account("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    Object.assign(page.api.S, { screen: "start", message: "new account" });
+    completion.resolve(response({}));
+    await pending;
+    assert.equal(page.api.S.screen, "start");
+    assert.equal(page.api.S.session, null);
+    assert.equal(page.api.S.results, null);
+    assert.equal(page.api.S.paused, false);
+    assert.equal(page.api.S.message, "new account");
+    assert.equal(requests.filter((req) => req.path === "api/resume").length, 1);
+    assert.equal(requests.filter((req) => req.path === "api/results").length, stage === "confirmed" ? 1 : 0);
+  });
+}
+
+test("failed Resume stays paused and preserves the pass for an explicit retry", async (t) => {
+  const { page, requests } = pausedPage("checking", async (path) => {
+    if (path === "api/results") return response({ items: [] });
+    assert.equal(path, "api/resume");
+    return response({ error: "Resume temporarily unavailable" }, 500);
+  });
+  t.after(() => page.api.resetAccount());
+  await page.api.boot();
+  await page.get("resume-checking").dispatch("click");
+  assert.equal(page.api.S.paused, true);
+  assert.equal(page.api.S.polling, null);
+  assert.equal(page.api.S.session, "saved-pass");
+  assert.equal(page.api.S.answers[1], "saved answer");
+  assert.equal(page.get("resume-checking").disabled, false);
+  assert.match(page.get("check-sub").textContent, /Resume temporarily unavailable/);
+  assert.equal(requests.filter((req) => req.path === "api/resume").length, 1);
+});
+
+for (const retry of [false, true]) {
+  test(`saving polls read the results status envelope and ${retry ? "unlock failed writes" : "retain rendered rows on completion"}`, async (t) => {
+    const requests = [];
+    const page = pageHarness(async (path, init = {}) => {
+      requests.push({ path, init });
+      return response({ ...interruptedResult(false), status: { written: !retry, retry, message: retry ? "No grades saved. Try again." : "Saved safely.", more: 2 } });
+    });
+    t.after(() => page.api.resetAccount());
+    readyStart(page);
+    page.api.S.session = "saved-pass";
+    page.api.showResults(interruptedResult(false));
+    const row = page.get("res-rows").children[0];
+    await flushPage();
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].path, "api/results");
+    assert.equal(requests[0].init.method, undefined);
+    assert.equal(page.api.S.polling, null);
+    assert.equal(page.api.S.grades[1], "Hard");
+    assert.equal(page.api.S.written, !retry);
+    assert.equal(page.api.S.locked, !retry);
+    assert.equal(page.api.S.more, 2);
+    assert.equal(page.get("res-hint").textContent, retry ? "No grades saved. Try again." : "Saved safely.");
+    if (retry) assert.equal(page.get("write").disabled, false);
+    else assert.equal(page.get("res-rows").children[0], row);
+  });
+}
+
+test("Resume with an expired pass reloads state without polling or sending it again", async (t) => {
+  const { page, requests } = pausedPage("checking", async (path) => {
+    assert.equal(path, "api/resume");
+    return response({ code: "session" }, 409);
+  });
+  t.after(() => page.api.resetAccount());
+  await page.api.boot();
+  await page.get("resume-checking").dispatch("click");
+  assert.equal(page.reloads, 1);
+  assert.equal(page.api.S.polling, null);
+  assert.equal(requests.filter((req) => req.path === "api/resume").length, 1);
+  assert.equal(requests.filter((req) => req.path === "api/results").length, 0);
 });

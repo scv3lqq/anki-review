@@ -30,6 +30,7 @@ type Service interface {
 	Start(ctx context.Context, deck string, count int) error
 	More(ctx context.Context, session string, count int) error
 	SubmitAnswers(session string, answers map[int]string) error
+	Resume(session string) error
 	Regrade(session string) error
 	Confirm(session string, grades map[int]domain.Grade) error
 	Reset(session string) error
@@ -41,7 +42,7 @@ type Owner interface {
 	Authorized(token string) bool
 	Setup(ctx context.Context, client string, in owner.SetupInput) (string, error)
 	Login(ctx context.Context, client, user, password string) (string, error)
-	Logout(token string)
+	Logout(token string) error
 	Update(ctx context.Context, token string, in owner.UpdateInput) error
 }
 
@@ -132,6 +133,7 @@ func NewWithOptions(own Owner, review func() Service, static fs.FS, log zerolog.
 	mux.HandleFunc("POST /api/start", h.reviewing(h.start))
 	mux.HandleFunc("POST /api/more", h.reviewing(h.more))
 	mux.HandleFunc("POST /api/answers", h.reviewing(h.answers))
+	mux.HandleFunc("POST /api/resume", h.reviewing(h.resume))
 	mux.HandleFunc("POST /api/regrade", h.reviewing(h.regrade))
 	mux.HandleFunc("POST /api/confirm", h.reviewing(h.confirm))
 	mux.HandleFunc("POST /api/reset", h.reviewing(h.reset))
@@ -309,6 +311,13 @@ func (h *handler) answers(w http.ResponseWriter, r *http.Request, svc Service) {
 		byN[a.N] = a.Answer
 	}
 	h.reply(w, svc.SubmitAnswers(req.Session, byN))
+}
+
+func (h *handler) resume(w http.ResponseWriter, r *http.Request, svc Service) {
+	var req sessionRequest
+	if decode(w, r, &req) {
+		h.reply(w, svc.Resume(req.Session))
+	}
 }
 
 func (h *handler) regrade(w http.ResponseWriter, r *http.Request, svc Service) {
@@ -518,7 +527,10 @@ func (h *handler) signIn(w http.ResponseWriter, r *http.Request, token string, e
 }
 
 func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
-	h.own.Logout(sessionToken(r))
+	if err := h.own.Logout(sessionToken(r)); err != nil {
+		h.ownerFail(w, err)
+		return
+	}
 	setSessionCookie(w, r, "", -1)
 	writeJSON(w, http.StatusOK, ok)
 }

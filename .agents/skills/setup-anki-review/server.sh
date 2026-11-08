@@ -43,7 +43,7 @@ die() {
 svc="anki-review"
 bin_local=$root/bin/anki-review-linux-amd64
 bin_provisioner_local=$root/bin/anki-review-provisioner-linux-amd64
-kit_top="install.sh smoke.sh provider.sh test-provider.sh autodeploy.sh install-multi-account.sh check-passes.py test-multi-account.py"
+kit_top="install.sh smoke.sh provider.sh test-provider.sh session-key.py test-session-key.py autodeploy.sh install-multi-account.sh check-passes.py test-multi-account.py"
 kit_units="anki-review.service anki-review-deploy.service anki-review-deploy.timer anki-review-provisioner.service"
 kit_anki="Dockerfile compose.yaml entrypoint.sh setup-profile.py native_audio.py patch_ankiconnect.py test-native-audio.py syncserver.sh up.sh"
 kit_all="$kit_top systemd/anki-review.service systemd/anki-review-deploy.service systemd/anki-review-deploy.timer systemd/anki-review-provisioner.service anki/Dockerfile anki/compose.yaml anki/entrypoint.sh anki/setup-profile.py anki/native_audio.py anki/patch_ankiconnect.py anki/test-native-audio.py anki/syncserver.sh anki/up.sh"
@@ -508,7 +508,7 @@ sys.exit(0 if isinstance(s, dict) and s.get("state") != "setup" and s.get("unloc
   if [ "$answered" = 0 ]; then
     echo "owner: no answer from the host over ssh in 30 minutes"
   else
-    echo "owner: still not unlocked after 30 minutes"
+    echo "owner: still not unlocked after 30 minutes (existing browser sessions recover lazily; interrupted work requires Resume)"
   fi
   return 1
 }
@@ -610,7 +610,7 @@ elif s is not None:
     elif s.get("unlocked"):
         print("owner: unlocked")
     else:
-        print("owner: locked (log in on the page)")
+        print("owner: locked (existing browser session may recover; otherwise log in on the page)")
     if s.get("state") == "setup":
         print("api stage: none (no owner yet)")
     elif "stage" in s:

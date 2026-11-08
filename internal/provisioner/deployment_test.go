@@ -16,11 +16,11 @@ func TestInstallerBinaryLayouts(t *testing.T) {
 	}
 	source := string(contents)
 	start := strings.Index(source, "binary=")
-	end := strings.Index(source[start:], "for tool in")
-	if start < 0 || end < 0 {
-		t.Fatal("cannot locate installer binary selection")
+	end := strings.Index(source, "# Preflight the HTTP recovery key")
+	if start < 0 || end <= start {
+		t.Fatal("cannot locate installer binary selection before recovery preflight")
 	}
-	selection := source[start : start+end]
+	selection := source[start:end]
 	for _, layout := range []string{"source", "kit", "missing"} {
 		t.Run(layout, func(t *testing.T) {
 			root := t.TempDir()

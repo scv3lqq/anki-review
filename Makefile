@@ -16,6 +16,7 @@ check-deploy:
 	done
 	bash deploy/test-provider.sh
 	python3 -I deploy/test-multi-account.py
+	python3 -I deploy/test-session-key.py
 	python3 -I deploy/anki/test-native-audio.py
 
 check-web:
