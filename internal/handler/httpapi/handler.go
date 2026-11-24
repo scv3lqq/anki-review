@@ -138,6 +138,7 @@ func NewWithOptions(own Owner, review func() Service, static fs.FS, log zerolog.
 	mux.HandleFunc("POST /api/confirm", h.reviewing(h.confirm))
 	mux.HandleFunc("POST /api/reset", h.reviewing(h.reset))
 	mux.HandleFunc("POST /api/import", h.authed(h.importPackage))
+	mux.HandleFunc("GET /api/activity", h.authed(h.activity))
 	mux.HandleFunc("GET /api/preferences", h.authed(h.preferences))
 	mux.HandleFunc("POST /api/preferences", h.authed(h.savePreferences))
 	mux.HandleFunc("GET /api/render", h.reviewing(h.render))

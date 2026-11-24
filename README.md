@@ -285,3 +285,15 @@ retried with the same invitation and login.
 ## License
 
 [MIT](LICENSE)
+
+### Activity
+
+Activity reads the connected collection without changing it. Reviews count rated
+review events, including repeated reviews of the same card; new cards are counted
+by their creation timestamp. Active days contain either kind of event. The current
+streak counts consecutive days with reviews through today, or through yesterday
+when today has none. Dates follow the browser's time zone (UTC if unavailable).
+Deck totals use each card's current deck. History for deleted cards is incomplete,
+and the available history depends on what the connected collection exposes.
+Large collections may exceed the dashboard's request or processing limits, in
+which case Activity reports an error rather than returning partial statistics.

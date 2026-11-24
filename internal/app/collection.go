@@ -3,6 +3,9 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
+
+	"github.com/scv3lqq/anki-review/internal/domain"
 
 	"github.com/scv3lqq/anki-review/internal/repository/ankiconnect"
 	"github.com/scv3lqq/anki-review/internal/repository/apkg"
@@ -52,4 +55,8 @@ func (c *collectionAdapter) SavePreferences(ctx context.Context, decks []string)
 		return err
 	}
 	return svc.UpdateKnowledgeDecks(ctx, decks, func() error { return filestore.SavePreferences(c.account.cfg.DataDir, decks) })
+}
+
+func (c *collectionAdapter) Activity(ctx context.Context, now time.Time) ([]domain.ActivityDay, error) {
+	return review.ReadActivity(ctx, c.client(), now)
 }

@@ -16,7 +16,7 @@ const initialState = () => ({
   decks: [], deck: null, starting: false, decksLoading: false, dueRefresh: null, gradeError: "",
   authed: false, settings: false, provider: "claude", graderConnected: false,
   accountId: null, isOwner: false, managed: false, multiAccount: false,
-  knowledgeDecks: [], inviteLink: "", authBusy: false, importing: false,
+  workspace: "review", activityData: null, activityPending: null, knowledgeDecks: [], inviteLink: "", authBusy: false, importing: false,
 });
 const S = initialState();
 let accountEpoch = 0;
@@ -37,7 +37,7 @@ function resetAccount(id = null) {
   accountEpoch++;
   const multiAccount = S.multiAccount;
   Object.assign(S, initialState(), { accountId: id, multiAccount });
-  if (typeof document !== "undefined") clearAccountDOM();
+  if (typeof document !== "undefined") { clearAccountDOM(); $("activity-content").hidden = true; $("activity-status").textContent = ""; activityWidget.clear(); }
 }
 
 function selectAccount(info) {
@@ -249,6 +249,13 @@ function show() {
   S.dueRefresh = null;
   // settings cover the screen underneath, so a poll that lands meanwhile can't pull the user away
   const active = S.settings ? "settings" : S.screen;
+  const activityOpen = S.authed && !S.settings && S.workspace === "activity";
+  $("workspace-nav").hidden = !S.authed || S.settings;
+  $("workspace-review").setAttribute("aria-pressed", String(!activityOpen));
+  $("workspace-activity").setAttribute("aria-pressed", String(activityOpen));
+  $("review-workspace").hidden = activityOpen;
+  $("activity-workspace").hidden = !activityOpen;
+  if (activityOpen && S.activityData && !$("activity-content").hidden) activityWidget.revealSelection();
   const input = active === "input";
   $("tabs").hidden = !input;
   for (const b of $("tabs").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.view === S.view));
@@ -267,8 +274,9 @@ function show() {
   $("setup").hidden = active !== "setup";
   $("login").hidden = active !== "login";
   $("settings").hidden = active !== "settings";
-  if (input && S.view === "card") renderCard();
-  if (input && S.view === "list") renderList();
+  if (activityOpen) { $("tabs").hidden = true; $("back").hidden = true; $("start-bar").hidden = true; $("list-bar").hidden = true; $("res-bar").hidden = true; }
+  if (!activityOpen && input && S.view === "card") renderCard();
+  if (!activityOpen && input && S.view === "list") renderList();
   configureAccountUI();
 }
 
@@ -1378,6 +1386,295 @@ async function boot() {
     showResults(results);
   } catch (error) { if (!interrupted(epoch, error)) showError(); }
 }
+
+
+const activityWidget = (() => {
+const number = new Intl.NumberFormat('en-US');
+const dayFormat = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+const monthFormat = new Intl.DateTimeFormat('en-US', { month: 'short' });
+const weekdayFormat = new Intl.DateTimeFormat('en-US', { weekday: 'short' });
+const rangeFormat = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+const fullDate = new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+
+const deckColors = ['#85b775', '#9f8cda', '#75a6ab', '#b69c6c'];
+
+let days = [];
+const grid = document.getElementById('calendar-grid');
+const scroller = document.getElementById('calendar-scroll');
+const tooltip = document.getElementById('tooltip');
+const rangeButtons = [...document.querySelectorAll('[data-range]')];
+const seriesButtons = [...document.querySelectorAll('button[data-series]')];
+const state = { range: 365, series: 'reviews', selected: 364 };
+let dateCells = new Map();
+let weekButtons = new Map();
+
+function put(id, value) {
+  document.getElementById(id).textContent = value;
+}
+
+function sum(rows, key) {
+  return rows.reduce((total, row) => total + row[key], 0);
+}
+
+function dayLabel(day) {
+  return `${fullDate.format(day.date)}: ${day.reviews} reviews, ${day.added} new cards`;
+}
+
+function setSelection(index) {
+  dateCells.get(state.selected)?.setAttribute('aria-pressed', 'false');
+  weekButtons.get(state.selected)?.setAttribute('aria-pressed', 'false');
+  if (dateCells.has(state.selected)) dateCells.get(state.selected).tabIndex = -1;
+  state.selected = index;
+
+  const day = days[index];
+  put('selected-date', dayFormat.format(day.date));
+  put('day-reviews', number.format(day.reviews));
+  put('day-added', number.format(day.added));
+
+  const cell = dateCells.get(index);
+  if (cell) {
+    cell.tabIndex = 0;
+    cell.setAttribute('aria-pressed', 'true');
+  }
+  weekButtons.get(index)?.setAttribute('aria-pressed', 'true');
+}
+
+function renderTotals(rows) {
+  const reviews = sum(rows, 'reviews');
+  const active = rows.filter(day => day.reviews || day.added).length;
+  let streak = 0;
+  const today = days.at(-1);
+  for (let index = today.reviews ? today.index : today.index - 1; index >= 0 && days[index].reviews; index--) {
+    streak++;
+  }
+
+  put('total-reviews', number.format(reviews));
+  put('review-caption', `${number.format(Math.round(reviews / rows.length))} per day on average`);
+  put('total-added', number.format(sum(rows, 'added')));
+  put('total-days', number.format(active));
+  put('days-caption', `Across ${rows.length} days in this period`);
+  const suffix = document.createElement('small');
+  suffix.textContent = streak === 1 ? 'day' : 'days';
+  document.getElementById('streak').replaceChildren(number.format(streak), " ", suffix);
+  put('calendar-period', rangeFormat.formatRange(rows[0].date, rows.at(-1).date).replace(/\s*–\s*/g, ' to '));
+  put('decks-caption', state.range === 365 ? 'Last year' : 'Last 12 weeks');
+}
+
+function intensity(count) {
+  if (!count) return 0;
+  const limits = state.series === 'reviews' ? [15, 35, 59] : [2, 5, 9];
+  return 1 + limits.filter(limit => count > limit).length;
+}
+
+function showTooltip(cell, day) {
+  tooltip.textContent = `${dayFormat.format(day.date)} · ${day.reviews} reviews · ${day.added} new`;
+  tooltip.hidden = false;
+  const bounds = cell.getBoundingClientRect();
+  const origin = tooltip.parentElement.getBoundingClientRect();
+  const left = bounds.left - origin.left + (bounds.width - tooltip.offsetWidth) / 2;
+  tooltip.style.left = `${Math.max(0, Math.min(left, origin.width - tooltip.offsetWidth))}px`;
+  tooltip.style.top = `${bounds.top - origin.top - tooltip.offsetHeight - 7}px`;
+}
+
+function hideTooltip() {
+  tooltip.hidden = true;
+}
+
+function renderCalendar(rows) {
+  dateCells = new Map();
+  grid.replaceChildren();
+  hideTooltip();
+  const firstOffset = (rows[0].date.getDay() + 6) % 7;
+  const weekCount = Math.ceil((rows.length + firstOffset) / 7);
+  grid.style.setProperty('--weeks', weekCount);
+  grid.classList.toggle('short', state.range === 84);
+  const content = document.createDocumentFragment();
+  let lastMonthColumn = -Infinity;
+
+  rows.forEach((day, index) => {
+    const position = index + firstOffset;
+    const column = Math.floor(position / 7) + 1;
+    const row = position % 7 + 2;
+    const previous = rows[index - 1];
+    const newMonth = previous
+      ? day.date.getMonth() !== previous.date.getMonth()
+      : day.date.getDate() <= 21;
+    const monthHasSpace = weekCount - column >= 1 && column - lastMonthColumn >= 2;
+    if (newMonth && monthHasSpace) {
+      const label = document.createElement('span');
+      label.className = 'month';
+      label.style.gridColumn = column;
+      label.textContent = monthFormat.format(day.date);
+      label.setAttribute('aria-hidden', 'true');
+      content.append(label);
+      lastMonthColumn = column;
+    }
+
+    const cell = document.createElement('button');
+    cell.type = 'button';
+    cell.className = 'cell';
+    cell.dataset.day = day.index;
+    cell.dataset.level = intensity(day[state.series]);
+    cell.style.gridColumn = column;
+    cell.style.gridRow = row;
+    cell.tabIndex = -1;
+    cell.setAttribute('aria-pressed', 'false');
+    cell.setAttribute('aria-label', dayLabel(day));
+    cell.addEventListener('click', () => setSelection(day.index));
+    cell.addEventListener('pointerenter', event => {
+      if (event.pointerType !== 'touch') showTooltip(cell, day);
+    });
+    cell.addEventListener('pointerleave', hideTooltip);
+    dateCells.set(day.index, cell);
+    content.append(cell);
+  });
+
+  grid.append(content);
+  scroller.scrollLeft = scroller.scrollWidth;
+}
+
+grid.addEventListener('keydown', event => {
+  const offsets = { ArrowUp: -1, ArrowDown: 1, ArrowLeft: -7, ArrowRight: 7 };
+  if (event.key === 'Escape') {
+    hideTooltip();
+    return;
+  }
+  const offset = offsets[event.key];
+  if (offset === undefined || !event.target.matches('.cell')) return;
+  event.preventDefault();
+  const current = Number(event.target.dataset.day);
+  const weekday = days[current].date.getDay();
+  if ((event.key === 'ArrowUp' && weekday === 1) || (event.key === 'ArrowDown' && weekday === 0)) return;
+  const index = current + offset;
+  const cell = dateCells.get(index);
+  if (cell) {
+    setSelection(index);
+    cell.focus();
+  }
+});
+
+scroller.addEventListener('scroll', hideTooltip, { passive: true });
+
+function renderWeek() {
+  const rows = days.slice(-7);
+  const max = Math.max(...rows.map(day => day.reviews));
+  const chart = document.getElementById('week-chart');
+  const summary = document.getElementById('week-totals');
+  put('week-caption', `${dayFormat.format(rows[0].date)} to ${dayFormat.format(rows.at(-1).date)}`);
+  summary.innerHTML = `<span><b>${number.format(sum(rows, 'reviews'))}</b> reviews</span><span><b>${number.format(sum(rows, 'added'))}</b> new</span>`;
+  weekButtons = new Map();
+  chart.replaceChildren();
+
+  rows.forEach(day => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'week-day';
+    button.setAttribute('aria-label', dayLabel(day));
+    button.setAttribute('aria-pressed', 'false');
+    button.style.setProperty('--height', `${100 * day.reviews / (max || 1)}%`);
+    button.innerHTML = `<b>${day.reviews}</b><span class="bar-track" aria-hidden="true"><i class="bar"></i></span><span>${weekdayFormat.format(day.date)}</span>`;
+    button.addEventListener('click', () => {
+      setSelection(day.index);
+      revealSelection();
+    });
+    weekButtons.set(day.index, button);
+    chart.append(button);
+  });
+}
+
+function renderDecks(rows) {
+  const totals = new Map();
+  for (const day of rows) for (const item of day.decks) {
+    const deck = totals.get(item.name) || {name:item.name, reviews:0, added:0};
+    deck.reviews += item.reviews; deck.added += item.new; totals.set(item.name, deck);
+  }
+  const decks = [...totals.values()].sort((a,b) => b.reviews-a.reviews || a.name.localeCompare(b.name));
+  document.getElementById('activity-decks').replaceChildren(...decks.map((deck,index) => {
+    const entry = document.createElement('li'); entry.style.setProperty('--deck', deckColors[index % deckColors.length]);
+    const name = document.createElement('span'); name.className='deck-name'; name.textContent=deck.name;
+    const reviews = document.createElement('span'); reviews.textContent=number.format(deck.reviews);
+    const added = document.createElement('span'); added.textContent=number.format(deck.added);
+    entry.append(name,reviews,added); return entry;
+  }));
+}
+
+function revealSelection() {
+  const cell = dateCells.get(state.selected);
+  if (!cell) return;
+  const bounds = cell.getBoundingClientRect();
+  const visible = scroller.getBoundingClientRect();
+  if (bounds.left < visible.left || bounds.right > visible.right) {
+    scroller.scrollLeft += bounds.left - visible.left - visible.width / 2;
+  }
+}
+
+function render() {
+  const rows = days.slice(-state.range);
+  document.getElementById('activity-workspace').dataset.series = state.series;
+  renderTotals(rows);
+  renderCalendar(rows);
+  renderDecks(rows);
+  setSelection(Math.max(rows[0].index, state.selected));
+  revealSelection();
+}
+
+rangeButtons.forEach(button => button.addEventListener('click', () => {
+  if (state.range === Number(button.dataset.range)) return;
+  state.range = Number(button.dataset.range);
+  rangeButtons.forEach(option => option.setAttribute('aria-pressed', String(option === button)));
+  render();
+}));
+
+seriesButtons.forEach(button => button.addEventListener('click', () => {
+  if (state.series === button.dataset.series) return;
+  state.series = button.dataset.series;
+  document.getElementById('activity-workspace').dataset.series = state.series;
+  seriesButtons.forEach(option => option.setAttribute('aria-pressed', String(option === button)));
+  dateCells.forEach((cell, index) => {
+    cell.dataset.level = intensity(days[index][state.series]);
+  });
+  hideTooltip();
+}));
+
+function setData(data) {
+  days = data.map((day,index) => ({...day, index, added:day.new, date:new Date(`${day.date}T12:00:00`)}));
+  if (days.length !== 365) throw new Error("Invalid activity data");
+  state.selected = Math.min(state.selected, days.length - 1);
+  renderWeek(); render();
+}
+function clear() {
+  days = []; state.range = 365; state.series = 'reviews'; state.selected = 364;
+  grid.replaceChildren(); document.getElementById('activity-decks').replaceChildren();
+  document.getElementById('week-chart').replaceChildren();
+  for (const id of ['total-reviews','review-caption','total-added','total-days','days-caption','streak','calendar-period','decks-caption','selected-date','day-reviews','day-added','week-caption','week-totals']) put(id, '');
+  rangeButtons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.range === '365')));
+  seriesButtons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.series === 'reviews')));
+}
+return {setData, clear, revealSelection};
+
+})();
+async function loadActivity() {
+  if (S.activityPending) return S.activityPending;
+  const epoch = accountEpoch;
+  $("activity-status").textContent = "Loading activity…";
+  $("activity-retry").hidden = true;
+  const pending = (async () => {
+    try {
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      const data = await requestJSON(`api/activity?timezone=${encodeURIComponent(zone)}`, {cache:"no-store"});
+      assertCurrent(epoch); S.activityData = data.days; activityWidget.setData(data.days);
+      $("activity-content").hidden = false;
+      if (!$("activity-workspace").hidden) activityWidget.revealSelection();
+      $("activity-status").textContent = data.days.some(day => day.reviews || day.new) ? "" : "No activity in this period.";
+    } catch (error) {
+      if (!interrupted(epoch, error)) { $("activity-status").textContent = "Activity is unavailable. Please try again."; $("activity-retry").hidden = false; }
+    } finally { if (currentAccount(epoch)) S.activityPending = null; }
+  })();
+  S.activityPending = pending; return pending;
+}
+$("workspace-review").addEventListener("click", () => { S.workspace="review"; show(); });
+$("workspace-activity").addEventListener("click", () => { if (S.workspace === "activity") return; S.workspace="activity"; show(); loadActivity(); });
+$("activity-retry").addEventListener("click", loadActivity);
 
 setInterval(refreshDueCards, DUE_REFRESH_MS);
 document.addEventListener("visibilitychange", refreshDueCards);

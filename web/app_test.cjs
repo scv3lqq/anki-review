@@ -111,7 +111,7 @@ class Element {
 
 const flushPage = () => new Promise((resolve) => setImmediate(resolve));
 
-function pageHarness(fetch, hash = "") {
+function pageHarness(fetch, hash = "", widget = null) {
   const nodes = new Map();
   for (const match of fs.readFileSync(`${__dirname}/index.html`, "utf8").matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"[^>]*>([^<]*)/g)) {
     const node = new Element(match[1]);
@@ -151,7 +151,9 @@ function pageHarness(fetch, hash = "") {
     localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, String(value)), removeItem: (key) => storage.delete(key) },
     document,
   });
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, "") + `\nglobalThis.api = { S, selectAccount, resetAccount, showSetup, submitSetup, configureAccountUI, loadPreferences, savePreferences, importCards, createInvitation, cardContent, boot, pollResults, post, logout, showStart, showResults, show, startPass, takeMore, pickDeck, setPref, refreshDueCards: typeof refreshDueCards === "function" ? refreshDueCards : undefined };`, context);
+  const script = widget ? source.replace(/const activityWidget = \(\(\) => \{[\s\S]*?\n\}\)\(\);/, "const activityWidget = globalThis.testWidget;") : source;
+  if (widget) context.testWidget = widget;
+  vm.runInContext(script.replace(/\nboot\(\);\s*$/, "") + `\nglobalThis.api = { S, selectAccount, resetAccount, showSetup, submitSetup, configureAccountUI, loadPreferences, savePreferences, importCards, createInvitation, cardContent, boot, pollResults, post, logout, showStart, showResults, show, startPass, takeMore, pickDeck, setPref, refreshDueCards: typeof refreshDueCards === "function" ? refreshDueCards : undefined };`, context);
   return {
     api: context.api, nodes, location, get, context, document, window, intervals,
     get reloads() { return reloads; },
@@ -805,4 +807,60 @@ test("Resume with an expired pass reloads state without polling or sending it ag
   assert.equal(page.api.S.polling, null);
   assert.equal(requests.filter((req) => req.path === "api/resume").length, 1);
   assert.equal(requests.filter((req) => req.path === "api/results").length, 0);
+});
+
+test("activity request is fenced across accounts and switching preserves answers", async () => {
+  const reply = deferred();
+  const page = pageHarness(async () => reply.promise);
+  page.api.selectAccount(account("owner")); page.api.S.authed = true; page.api.S.screen = "input";
+  page.api.S.answers = { 1: "draft" }; page.api.S.idx = 0;
+  await page.get("workspace-activity").dispatch("click");
+  assert.equal(page.api.S.workspace, "activity");
+  assert.equal(page.api.S.answers[1], "draft");
+  page.api.selectAccount(account("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+  reply.resolve({ status: 200, ok: true, headers: { get: () => "owner" }, json: async () => ({days: []}) });
+  await flushPage();
+  assert.equal(page.api.S.activityData, null);
+  assert.equal(page.get("activity-content").hidden, true);
+});
+
+
+test("activity reveals its selected day after the content becomes visible and on re-entry", async () => {
+  const reply = deferred();
+  let page;
+  const visibleAtReveal = [];
+  const widget = {
+    clear() {}, setData() {},
+    revealSelection() { visibleAtReveal.push(!page.get("activity-content").hidden && !page.get("activity-workspace").hidden); },
+  };
+  page = pageHarness(async () => reply.promise, "", widget);
+  page.api.selectAccount(account("owner")); page.api.S.authed = true; page.api.S.screen = "start";
+  page.get("activity-content").hidden = true;
+  await page.get("workspace-activity").dispatch("click");
+  reply.resolve({status:200, ok:true, headers:{get:()=>"owner"}, json:async()=>({days:[{reviews:1,new:0}]})});
+  await flushPage();
+  assert.deepEqual(visibleAtReveal, [true]);
+  await page.get("workspace-review").dispatch("click");
+  await page.get("workspace-activity").dispatch("click");
+  assert.deepEqual(visibleAtReveal, [true, true]);
+});
+
+test("activity completed in Review reveals its retained day on re-entry", async () => {
+  const reply = deferred();
+  let page;
+  const visibleAtReveal = [];
+  const widget = {
+    clear() {}, setData() {},
+    revealSelection() { visibleAtReveal.push(!page.get("activity-content").hidden && !page.get("activity-workspace").hidden); },
+  };
+  page = pageHarness(async () => reply.promise, "", widget);
+  page.api.selectAccount(account("owner")); page.api.S.authed = true; page.api.S.screen = "start";
+  page.get("activity-content").hidden = true;
+  await page.get("workspace-activity").dispatch("click");
+  await page.get("workspace-review").dispatch("click");
+  reply.resolve({status:200, ok:true, headers:{get:()=>"owner"}, json:async()=>({days:[{reviews:1,new:0}]})});
+  await flushPage();
+  assert.deepEqual(visibleAtReveal, []);
+  await page.get("workspace-activity").dispatch("click");
+  assert.deepEqual(visibleAtReveal, [true]);
 });
