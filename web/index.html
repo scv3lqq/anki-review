@@ -16,6 +16,7 @@
 <body>
 <header class="wrap top">
   <div class="brand"><h1>Review</h1><span class="meta" id="meta"></span></div>
+  <nav id="workspace-nav" hidden aria-label="Workspace"><button type="button" id="workspace-review" aria-pressed="true">Review</button><button type="button" id="workspace-activity" aria-pressed="false">Activity</button></nav>
   <div class="top-right">
     <div class="tabs" id="tabs" hidden>
       <button type="button" data-view="card" aria-pressed="true">Card</button>
@@ -28,6 +29,7 @@
 </header>
 
 <main class="wrap">
+<div id="review-workspace">
   <section id="start" hidden>
     <ol class="decks" id="decks"></ol>
     <p class="empty" id="start-empty" hidden>Nothing to review today.</p>
@@ -249,6 +251,80 @@
       <p class="status" id="invite-status" role="status" hidden></p>
     </section>
   </section>
+</div>
+<section id="activity-workspace" hidden><p id="activity-status" role="status"></p><button type="button" id="activity-retry" hidden>Retry</button><div id="activity-content" hidden>
+
+  <header class="page-heading">
+    <div>
+      <h1>Study activity</h1>
+      <p>Across all decks</p>
+    </div>
+    <div class="range" role="group" aria-label="Date range">
+      <button type="button" data-range="84" aria-pressed="false">12 weeks</button>
+      <button type="button" data-range="365" aria-pressed="true">1 year</button>
+    </div>
+  </header>
+
+  <dl class="metrics" aria-label="Activity totals">
+    <div><dt><i class="dot reviews"></i> Reviews</dt><dd id="total-reviews"></dd><dd class="metric-caption" id="review-caption"></dd></div>
+    <div><dt><i class="dot added"></i> New cards</dt><dd id="total-added"></dd><dd class="metric-caption">Cards added in this period</dd></div>
+    <div><dt>Active days</dt><dd id="total-days"></dd><dd class="metric-caption" id="days-caption"></dd></div>
+    <div><dt>Current streak</dt><dd id="streak"></dd><dd class="metric-caption">Consecutive days with reviews</dd></div>
+  </dl>
+
+  <section class="panel activity" aria-labelledby="calendar-title">
+    <header class="panel-heading">
+      <div>
+        <h2 id="calendar-title">Activity calendar</h2>
+        <p id="calendar-period"></p>
+      </div>
+      <div class="switch" role="group" aria-label="Calendar metric">
+        <button type="button" data-series="reviews" aria-pressed="true"><i class="dot reviews"></i> Reviews</button>
+        <button type="button" data-series="added" aria-pressed="false"><i class="dot added"></i> New cards</button>
+      </div>
+    </header>
+    <div class="activity-body">
+      <div class="calendar">
+        <div class="calendar-frame">
+          <div class="day-labels" aria-hidden="true"><span>Mon</span><span>Wed</span><span>Fri</span></div>
+          <div class="calendar-scroll" id="calendar-scroll">
+            <div id="calendar-grid" class="calendar-grid" role="group" aria-label="Select a day with the arrow keys"></div>
+          </div>
+        </div>
+        <div class="legend" aria-hidden="true">
+          <span>Less</span><i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i><span>More</span>
+        </div>
+        <div class="tooltip" id="tooltip" hidden></div>
+      </div>
+      <aside class="day-detail" aria-label="Selected day" aria-live="polite">
+        <span class="detail-label">Selected day</span>
+        <h3 id="selected-date"></h3>
+        <dl>
+          <div><dt><i class="dot reviews"></i> Reviews</dt><dd id="day-reviews"></dd></div>
+          <div><dt><i class="dot added"></i> New cards</dt><dd id="day-added"></dd></div>
+        </dl>
+      </aside>
+    </div>
+  </section>
+
+  <div class="lower">
+    <section class="panel" aria-labelledby="week-title">
+      <header class="panel-heading">
+        <div><h2 id="week-title">Last 7 days</h2><p id="week-caption"></p></div>
+        <div class="week-totals" id="week-totals"></div>
+      </header>
+      <div class="week-chart" id="week-chart"></div>
+    </section>
+    <section class="panel" aria-labelledby="deck-title">
+      <header class="panel-heading">
+        <div><h2 id="deck-title">By deck</h2><p id="decks-caption"></p></div>
+        <div class="deck-key" aria-hidden="true"><span>Reviews</span><span>New</span></div>
+      </header>
+      <ul class="deck-list" id="activity-decks"></ul>
+    </section>
+  </div>
+
+</div></section>
 </main>
 
 <div class="bar" id="start-bar" hidden>
